@@ -1,0 +1,12 @@
+.tmp/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+outputs/
+*.egg-info/
+
+# 27 vendored research repos, ~3.1 GB, each with its own .git.
+# Pinned commit SHAs are recorded in docs/MODEL_MATRIX.md.
+third_party/

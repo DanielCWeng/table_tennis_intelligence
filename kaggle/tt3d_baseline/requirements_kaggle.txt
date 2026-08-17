@@ -1,0 +1,31 @@
+# Minimum non-platform dependency set for TT3D table segmentation + raw
+# calibration at commit a2ef524ea0400262d6808db6cacf4a0b90bd0ad7.
+#
+# Inspect Kaggle first with environment_report.py.  Do not run this file as a
+# blind downgrade operation: keep compatible preinstalled packages and install
+# only missing/incompatible entries.  Torch and torchvision are intentionally
+# conditional because Kaggle normally supplies them with a CUDA build.
+
+albumentations==1.4.18
+lightning==2.3.3
+matplotlib==3.7.5
+numpy==1.24.4
+opencv-python==4.8.1.78
+pandas==2.0.3
+pillow==10.4.0
+PyYAML==6.0.2
+scikit-image==0.21.0
+scipy==1.10.1
+segmentation-models-pytorch==0.3.3
+sympy==1.13.3
+timm==0.9.2
+tqdm==4.67.1
+wandb==0.19.10
+
+# Conditional fallback only if Kaggle has no compatible installations:
+# torch==2.4.1
+# torchvision==0.19.1
+
+# Deliberately excluded from this calibration-only set:
+# casadi, pykalman, RTMPose/MMPose, MotionBERT, BlurBall, rally/trajectory
+# dependencies, and human reconstruction stacks.

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "table-tennis-intelligence"
+version = "0.1.0"
+description = "Offline, confidence-aware table-tennis video perception and match-state extraction"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+numeric = ["numpy>=1.24"]
+media = ["av>=12", "opencv-python>=4.8"]
+render = ["Pillow>=10"]
+storage = ["duckdb>=0.10", "pyarrow>=14"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+analyse = "ttintel.cli:main"
+ttintel = "ttintel.cli:main"
+ttintel-doctor = "ttintel.doctor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
