@@ -8,7 +8,7 @@ from typing import Sequence
 import uuid
 
 from .analytics import compute_analytics
-from .calibration import CalibrationError, calibrate_automatic
+from .calibration import CalibrationError, calibrate_consensus
 from .events import add_rally_boundaries, infer_events
 from .fusion import TwoPlayerIdentityAssigner, fuse_frame
 from .media import FramePacket, probe_video, read_frame_packets
@@ -67,7 +67,7 @@ def _calibrate_segments(
             segment.quality_flags.append("calibration_no_frames")
             continue
         try:
-            segment.table = calibrate_automatic(candidates[len(candidates) // 2].image)
+            segment.table = calibrate_consensus([packet.image for packet in candidates])
         except (CalibrationError, ValueError) as exc:
             segment.quality_flags.extend(["calibration_failed", str(exc)])
             warnings.append(f"{segment.segment_id}: automatic calibration unavailable ({exc})")

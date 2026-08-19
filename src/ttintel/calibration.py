@@ -532,6 +532,81 @@ def calibrate_automatic(image: np.ndarray) -> TableCalibration:
     )
 
 
+CONSENSUS_TOLERANCE_PX = 12.0
+
+
+def calibrate_consensus(
+    images: Sequence[np.ndarray],
+    *,
+    max_samples: int = 12,
+    min_agreement: int = 3,
+) -> TableCalibration:
+    """Calibrate a static camera from several frames and take the median corner.
+
+    Single-frame automatic calibration is fragile on real footage for a reason
+    that has nothing to do with the detector: a player leaning over the table
+    to serve hides a corner, and the detector reaches past it to the skirt line
+    underneath.  Those failures are transient while the camera is not, so
+    disagreement between frames is itself the signal.
+
+    Corners are the per-axis median over the frames that calibrated, which
+    rejects a minority of bad frames without needing a confidence threshold.
+    Per-corner spread around that median becomes the corner confidence, so a
+    segment where frames never agree reports low confidence rather than
+    silently returning one arbitrary frame's answer.
+    """
+
+    frames = list(images)
+    if not frames:
+        raise CalibrationError("consensus calibration requires at least one frame")
+    if len(frames) > max_samples:
+        picks = np.linspace(0, len(frames) - 1, max_samples).astype(int)
+        frames = [frames[index] for index in dict.fromkeys(int(i) for i in picks)]
+
+    corner_sets: list[list[tuple[float, float]]] = []
+    scores: list[float] = []
+    rejected = 0
+    for image in frames:
+        try:
+            candidate = calibrate_automatic(image)
+        except (CalibrationError, ValueError):
+            rejected += 1
+            continue
+        corner_sets.append([(point.x, point.y) for point in candidate.image_corners])
+        scores.append(float(candidate.confidence))
+
+    if not corner_sets:
+        raise CalibrationError(
+            f"automatic calibration failed on all {len(frames)} sampled frames"
+        )
+
+    stack = np.asarray(corner_sets, dtype=float)
+    consensus = np.median(stack, axis=0)
+    spread = np.median(np.linalg.norm(stack - consensus, axis=2), axis=0)
+    base = float(np.median(scores))
+
+    # Two independent signals, deliberately not multiplied into one number:
+    # ``corner_confidences`` stays the per-frame evidence strength, while
+    # cross-frame agreement is reported as its own flag.  Collapsing them
+    # would produce a scalar nobody can interpret -- consensus that corrects
+    # the corners would then *lower* the number, which is the wrong direction.
+    flags = ["heuristic", "calibration_consensus", f"consensus_frames_{len(corner_sets)}"]
+    flags.append(f"consensus_spread_px_{float(np.max(spread)):.1f}")
+    if rejected:
+        flags.append(f"consensus_rejected_{rejected}")
+    if float(np.max(spread)) > CONSENSUS_TOLERANCE_PX:
+        flags.append("consensus_disagreement")
+    if len(corner_sets) < min_agreement:
+        flags.append("consensus_insufficient_samples")
+
+    return make_calibration(
+        tuple(Point2D(float(x), float(y)) for x, y in consensus),
+        source=CalibrationSource.AUTOMATIC,
+        corner_confidences=(base,) * 4,
+        quality_flags=tuple(flags),
+    )
+
+
 def image_point_to_table(calibration: TableCalibration, point: Point2D) -> Point2D:
     return project_image_to_table(np.asarray(calibration.homography, dtype=float), point)
 
