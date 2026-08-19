@@ -229,12 +229,17 @@ class DefaultPerceptionProvider:
         self,
         annotations: AnnotationProvider | None = None,
         *,
+        ball_tracker: Any | None = None,
         pose_estimator: Any | None = None,
         racket_estimator: Any | None = None,
         use_bright_blob: bool = True,
     ) -> None:
         self.annotations = annotations
-        self.ball_tracker = BrightBlobBallTracker() if use_bright_blob else None
+        self.ball_tracker = (
+            ball_tracker
+            if ball_tracker is not None
+            else (BrightBlobBallTracker() if use_bright_blob else None)
+        )
         self.pose_estimator = pose_estimator or UnavailablePoseEstimator()
         self.racket_estimator = racket_estimator or UnavailableRacketEstimator()
 
@@ -253,6 +258,5 @@ class DefaultPerceptionProvider:
             detections.diagnostics.append(self.racket_estimator.info.name)
         if detections.ball is None and self.ball_tracker is not None:
             detections.ball = self.ball_tracker.estimate(packet)
-            if detections.ball and detections.ball.image.value is not None:
-                detections.diagnostics.append("bright_blob_ball_baseline")
+            detections.diagnostics.append(self.ball_tracker.info.name)
         return detections
