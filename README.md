@@ -25,9 +25,16 @@ The runnable core provides:
 - session storage under `sessions/<session-id>/` with raw/cleaned/fused/derived areas;
 - Pillow overlays showing table, axes, player IDs, skeletons, ball confidence, and events.
 
-Research adapters are intentionally optional. The current environment has no
-FFmpeg, PyAV, OpenCV, TransNetV2, RTMPose, TT3D, or model checkpoints, so the
-default pipeline never fabricates model observations. See
+Research adapters are intentionally optional, and the default pipeline never
+fabricates model observations when one is absent.
+
+Environment as verified on 2026-08-18 (`python -m ttintel.doctor --json`):
+PyAV 18, OpenCV 5.0, Pillow 11.3, NumPy 2.2, rtmlib, onnxruntime 1.28,
+duckdb, and pyarrow are all installed, as is Torch 2.6.0+cu124 with CUDA
+available on an RTX 3060 Laptop (6 GB). MMPose/MMEngine/MMCV/MMDet are not.
+TOTNet's 12 checkpoints and TT3D's `table_segmentation.ckpt` are present under
+`third_party/`. Earlier revisions of this file claimed none of this existed;
+docs written against that assumption understate what is runnable today. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/MODEL_MATRIX.md`](docs/MODEL_MATRIX.md),
 [`docs/IMPLEMENTATION_CHECKLIST.md`](docs/IMPLEMENTATION_CHECKLIST.md), and
 [`docs/INSTALL_HEAVY.md`](docs/INSTALL_HEAVY.md).
