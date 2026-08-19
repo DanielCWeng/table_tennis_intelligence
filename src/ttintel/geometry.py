@@ -129,6 +129,16 @@ def reprojection_error_px(
     image_corners: Sequence[Point2D],
     world_corners: Sequence[Point3D] | None = None,
 ) -> float:
+    """Return the four-corner fit residual in pixels.
+
+    This is a solver/arithmetic diagnostic, not a calibration-quality metric.
+    A homography fitted from exactly four point correspondences has enough
+    freedom to interpolate those four points, so this value will be close to
+    zero even when all four image corners describe the wrong quadrilateral.
+    Use redundant observations such as table-edge and net-line support to
+    assess whether the calibration is correct.
+    """
+
     destination = world_corners or table_corners_world()
     errors = []
     inverse = np.linalg.inv(homography)
@@ -145,7 +155,12 @@ def make_calibration(
     corner_confidences: Sequence[float] | None = None,
     quality_flags: Iterable[str] = (),
 ) -> TableCalibration:
-    """Create a table calibration from four ordered image corners."""
+    """Create a table calibration from four ordered image corners.
+
+    ``corner_confidences`` must come from the caller's evidence.  They are not
+    inflated or reduced using ``reprojection_error_px`` because that residual
+    cannot distinguish a correct four-point calibration from a wrong one.
+    """
 
     validate_image_corners(image_corners)
     world = table_corners_world()
@@ -154,10 +169,7 @@ def make_calibration(
     confidences = tuple(float(c) for c in (corner_confidences or (0.8, 0.8, 0.8, 0.8)))
     if len(confidences) != 4 or any(not 0.0 <= c <= 1.0 for c in confidences):
         raise ValueError("corner_confidences must contain four values between 0 and 1")
-    # Exact four-point DLT fit has zero corner error in ordinary conditions;
-    # confidence is still reduced for extreme conditioning or very uncertain
-    # corner inputs.  This is a quality signal, not a claim of 3-D accuracy.
-    confidence = max(0.0, min(1.0, min(confidences) * (1.0 if error <= 2.0 else 2.0 / error)))
+    confidence = max(0.0, min(1.0, min(confidences)))
     flags = list(quality_flags)
     if source == CalibrationSource.MANUAL and "calibration_manual" not in flags:
         flags.append("calibration_manual")

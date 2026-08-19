@@ -2,10 +2,12 @@ import numpy as np
 
 from ttintel.calibration import (
     calibrate_automatic,
+    calibration_quality,
     detect_table_corners_heuristic,
     image_point_to_table,
 )
-from ttintel.geometry import TABLE_LENGTH_M, TABLE_WIDTH_M
+from ttintel.geometry import TABLE_LENGTH_M, TABLE_WIDTH_M, make_calibration
+from ttintel.schemas import CalibrationSource, Point2D
 
 
 def _green_table_frame() -> np.ndarray:
@@ -56,3 +58,26 @@ def test_automatic_calibration_maps_corners_to_the_documented_table_frame() -> N
         table = image_point_to_table(calibration, corner)
         assert abs(table.x - want_x) < 1e-6
         assert abs(table.y - want_y) < 1e-6
+
+
+def test_heuristic_does_not_treat_a_blue_arena_as_the_table() -> None:
+    image = np.zeros((140, 200, 3), dtype=np.uint8)
+    image[:, :] = (35, 20, 110)
+
+    assert detect_table_corners_heuristic(image) is None
+
+
+def test_quality_fails_when_automatic_calibration_has_no_redundant_evidence() -> None:
+    wrong = (
+        Point2D(232, 671),
+        Point2D(1279, 219),
+        Point2D(1191, 16),
+        Point2D(48, 22),
+    )
+    calibration = make_calibration(wrong, source=CalibrationSource.AUTOMATIC)
+
+    quality = calibration_quality(calibration)
+
+    assert quality["reprojection_error_px"] < 1e-6
+    assert quality["quality_passed"] is False
+    assert "no_redundant_observations" in quality["quality_failure_reasons"]
