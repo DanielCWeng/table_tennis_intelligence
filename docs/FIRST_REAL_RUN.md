@@ -3,6 +3,11 @@
 Date: 2026-08-18. Before this, the pipeline had only ever run on synthetic
 fixtures. This records what it does on broadcast video, unedited.
 
+**This is a historical record and is deliberately not updated.** The
+calibration and ball-tracking failures below were both fixed later the same
+day; see [`STATE.md`](STATE.md) for current status. The findings about
+`reprojection_error_px` and about conservative thresholds still hold.
+
 ## Setup
 
 ```powershell

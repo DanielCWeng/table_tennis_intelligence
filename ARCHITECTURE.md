@@ -76,18 +76,23 @@ heuristic candidate is not serialised as an observed fact.
 | `rendering.py` | Pillow overlays and render manifest |
 | `storage.py` | Session directory and JSON/JSONL persistence |
 | `benchmark.py` | Gold-set ball/event metrics |
+| `adapters/totnet.py` | TOTNet ball tracking against the vendored TTA checkpoint |
 | `cli.py` | `analyse video.mp4` command |
 
 ## What is deliberately not claimed yet
 
-Without the optional external environments and checkpoints, this pass does not
-claim production-quality RTMPose, TT3D, BlurBall, TrackNetV3, TOTNet, 3-D human
-mesh, racket, or MP4 inference. The pipeline records those components as
-unavailable and remains useful for schema, geometry, annotation, and failure
-mode development. The model matrix is the source of truth for integration
-status.
+See [`docs/STATE.md`](docs/STATE.md) for what actually runs today. This
+section describes the original MVP scope and is no longer a current inventory.
+
+MP4 decoding and TOTNet ball tracking are now real and verified on broadcast
+footage. RTMPose, TT3D, BlurBall, TrackNetV3, 3-D human mesh and racket
+inference remain unclaimed, and the pipeline still records those components as
+unavailable rather than fabricating their output.
 
 ## Extension order
+
+Superseded by the ordering in [`docs/STATE.md`](docs/STATE.md), which was
+revised against real footage. Kept for provenance.
 
 1. Add a PyAV/FFmpeg environment and verify timestamps on a small local clip.
 2. Wrap TT3D calibration and MotionBERT artifacts without changing schemas.
