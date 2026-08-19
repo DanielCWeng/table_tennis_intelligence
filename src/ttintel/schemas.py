@@ -10,10 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 import json
-from typing import Any, Generic, Mapping, TypeVar
+from types import UnionType
+from typing import Any, Generic, Mapping, TypeVar, Union, get_args, get_origin, get_type_hints
 
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 
 
 class StrEnum(str, Enum):
@@ -85,21 +86,29 @@ class QualityFlag(StrEnum):
     PHYSICS_WARNING = "physics_warning"
 
 
+class SerializableSchema:
+    """Mixin that gives schema dataclasses a typed deserialisation seam."""
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> Any:
+        return from_dict(payload, cls)
+
+
 @dataclass(frozen=True)
-class Point2D:
+class Point2D(SerializableSchema):
     x: float
     y: float
 
 
 @dataclass(frozen=True)
-class Point3D:
+class Point3D(SerializableSchema):
     x: float
     y: float
     z: float
 
 
 @dataclass(frozen=True)
-class BoundingBox:
+class BoundingBox(SerializableSchema):
     """Pixel-space box using left, top, right, bottom coordinates."""
 
     x1: float
@@ -124,7 +133,7 @@ T = TypeVar("T")
 
 
 @dataclass
-class Estimate(Generic[T]):
+class Estimate(SerializableSchema, Generic[T]):
     """A value plus the evidence needed to interpret it safely."""
 
     value: T | None
@@ -133,15 +142,27 @@ class Estimate(Generic[T]):
     visibility: Visibility = Visibility.UNKNOWN
     inference_type: InferenceType = InferenceType.UNKNOWN
     quality_flags: list[str] = field(default_factory=list)
+    # ``value is None`` is not enough to describe an estimate. A tracker can
+    # run and report an absent target, while an unavailable estimator was
+    # never attempted. This bit survives persistence and makes those states
+    # queryable without interpreting a quality flag by convention.
+    attempted: bool = True
 
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise ValueError("confidence must be between 0 and 1")
         self.confidence = float(self.confidence)
         self.quality_flags = [str(flag) for flag in self.quality_flags]
+        self.attempted = bool(self.attempted)
 
     @classmethod
     def unknown(cls, source: str = "unavailable", *flags: str) -> "Estimate[Any]":
+        not_attempted = (
+            source == "unavailable"
+            or source.endswith(".unavailable")
+            or "model_unavailable" in flags
+            or "not_attempted" in flags
+        )
         return cls(
             value=None,
             confidence=0.0,
@@ -149,6 +170,31 @@ class Estimate(Generic[T]):
             visibility=Visibility.UNKNOWN,
             inference_type=InferenceType.UNKNOWN,
             quality_flags=list(flags),
+            attempted=not not_attempted,
+        )
+
+    @classmethod
+    def absent(
+        cls,
+        source: str,
+        confidence: float = 0.0,
+        visibility: Visibility = Visibility.UNKNOWN,
+        inference_type: InferenceType = InferenceType.MODEL_INFERRED,
+        *flags: str,
+    ) -> "Estimate[Any]":
+        """Construct an explicitly attempted estimate with no value."""
+
+        quality_flags = list(flags)
+        if "absent" not in quality_flags:
+            quality_flags.append("absent")
+        return cls(
+            value=None,
+            confidence=confidence,
+            source=source,
+            visibility=visibility,
+            inference_type=inference_type,
+            quality_flags=quality_flags,
+            attempted=True,
         )
 
     @classmethod
@@ -171,14 +217,14 @@ class Estimate(Generic[T]):
 
 
 @dataclass
-class JointState:
+class JointState(SerializableSchema):
     joint_name: str
     image: Estimate[Point2D]
     world: Estimate[Point3D] | None = None
 
 
 @dataclass
-class PoseObservation:
+class PoseObservation(SerializableSchema):
     observation_id: str
     bbox: Estimate[BoundingBox]
     joints: dict[str, JointState] = field(default_factory=dict)
@@ -187,7 +233,7 @@ class PoseObservation:
 
 
 @dataclass
-class PlayerState:
+class PlayerState(SerializableSchema):
     player_id: str
     bbox: Estimate[BoundingBox] | None = None
     joints: dict[str, JointState] = field(default_factory=dict)
@@ -206,7 +252,7 @@ class PlayerState:
 
 
 @dataclass
-class BallState:
+class BallState(SerializableSchema):
     image: Estimate[Point2D]
     world: Estimate[Point3D] | None = None
     table_xy: Estimate[Point2D] | None = None
@@ -216,7 +262,7 @@ class BallState:
 
 
 @dataclass
-class RacketState:
+class RacketState(SerializableSchema):
     bbox: Estimate[BoundingBox] | None = None
     keypoints: dict[str, Estimate[Point2D]] = field(default_factory=dict)
     centre: Estimate[Point2D] | None = None
@@ -225,7 +271,7 @@ class RacketState:
 
 
 @dataclass
-class CameraState:
+class CameraState(SerializableSchema):
     intrinsics: Estimate[dict[str, float]] | None = None
     rotation: Estimate[list[list[float]]] | None = None
     translation: Estimate[list[float]] | None = None
@@ -233,7 +279,7 @@ class CameraState:
 
 
 @dataclass
-class TableCalibration:
+class TableCalibration(SerializableSchema):
     image_corners: tuple[Point2D, Point2D, Point2D, Point2D]
     world_corners: tuple[Point3D, Point3D, Point3D, Point3D]
     homography: tuple[tuple[float, float, float], ...]
@@ -248,7 +294,7 @@ class TableCalibration:
 
 
 @dataclass
-class VideoMetadata:
+class VideoMetadata(SerializableSchema):
     video_id: str
     source_path: str
     width: int | None
@@ -261,7 +307,7 @@ class VideoMetadata:
 
 
 @dataclass
-class CameraSegment:
+class CameraSegment(SerializableSchema):
     segment_id: str
     video_id: str
     start_time: float
@@ -274,7 +320,7 @@ class CameraSegment:
 
 
 @dataclass
-class FrameState:
+class FrameState(SerializableSchema):
     frame_id: int
     timestamp: float
     segment_id: str
@@ -286,7 +332,7 @@ class FrameState:
 
 
 @dataclass
-class Event:
+class Event(SerializableSchema):
     event_id: str
     timestamp: float
     frame_id: int
@@ -301,7 +347,7 @@ class Event:
 
 
 @dataclass
-class MorphologyProfile:
+class MorphologyProfile(SerializableSchema):
     player_id: str
     estimated_height: Estimate[float] | None = None
     arm_span: Estimate[float] | None = None
@@ -319,7 +365,7 @@ class MorphologyProfile:
 
 
 @dataclass
-class Session:
+class Session(SerializableSchema):
     session_id: str
     video: VideoMetadata
     segments: list[CameraSegment] = field(default_factory=list)
@@ -347,6 +393,121 @@ def to_dict(value: Any) -> Any:
     """Convert a schema object (or nested value) into JSON-compatible data."""
 
     return _jsonable(value)
+
+
+def _from_dict(value: Any, target_type: Any) -> Any:
+    """Recursively rebuild a schema value from JSON-compatible data."""
+
+    if target_type is Any or target_type is None:
+        return value
+
+    origin = get_origin(target_type)
+    args = get_args(target_type)
+
+    if origin in (Union, UnionType):
+        if value is None and type(None) in args:
+            return None
+        for option in args:
+            if option is type(None):
+                continue
+            try:
+                return _from_dict(value, option)
+            except (TypeError, ValueError, KeyError):
+                continue
+        raise TypeError(f"cannot decode {value!r} as {target_type!r}")
+
+    if value is None:
+        return None
+
+    if origin is list:
+        item_type = args[0] if args else Any
+        return [_from_dict(item, item_type) for item in value]
+
+    if origin is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return tuple(_from_dict(item, args[0]) for item in value)
+        if len(value) != len(args):
+            raise ValueError(f"expected {len(args)} tuple items, got {len(value)}")
+        return tuple(_from_dict(item, item_type) for item, item_type in zip(value, args))
+
+    if origin is dict:
+        key_type = args[0] if args else Any
+        value_type = args[1] if len(args) > 1 else Any
+        return {
+            _from_dict(key, key_type): _from_dict(item, value_type)
+            for key, item in value.items()
+        }
+
+    if isinstance(target_type, type) and issubclass(target_type, Enum):
+        return target_type(value)
+
+    if origin is Estimate:
+        value_type = args[0] if args else Any
+        payload = dict(value)
+        unknown_fields = set(payload) - {
+            "value",
+            "confidence",
+            "source",
+            "visibility",
+            "inference_type",
+            "quality_flags",
+            "attempted",
+        }
+        if unknown_fields:
+            raise ValueError(f"unknown Estimate fields: {sorted(unknown_fields)}")
+        estimate_value = payload.get("value")
+        if estimate_value is not None:
+            estimate_value = _from_dict(estimate_value, value_type)
+        return Estimate(
+            value=estimate_value,
+            confidence=payload["confidence"],
+            source=payload["source"],
+            visibility=_from_dict(payload.get("visibility", Visibility.UNKNOWN.value), Visibility),
+            inference_type=_from_dict(
+                payload.get("inference_type", InferenceType.UNKNOWN.value), InferenceType
+            ),
+            quality_flags=list(payload.get("quality_flags", [])),
+            # A missing field is tolerated so that an in-memory object made
+            # before the field was introduced can still be inspected. New
+            # writes always include it.
+            attempted=payload.get("attempted", True),
+        )
+
+    if isinstance(target_type, type) and is_dataclass(target_type):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"expected an object for {target_type.__name__}")
+        hints = get_type_hints(target_type)
+        known_fields = {item.name for item in fields(target_type)}
+        unknown_fields = set(value) - known_fields
+        if unknown_fields:
+            raise ValueError(
+                f"unknown {target_type.__name__} fields: {sorted(unknown_fields)}"
+            )
+        kwargs: dict[str, Any] = {}
+        for item in fields(target_type):
+            if item.name not in value:
+                continue
+            kwargs[item.name] = _from_dict(value[item.name], hints.get(item.name, item.type))
+        return target_type(**kwargs)
+
+    if target_type in (float, int, str, bool):
+        return target_type(value)
+
+    return value
+
+
+def from_dict(value: Any, target_type: Any | None = None) -> Any:
+    """Rebuild a typed schema object from :func:`to_dict` output.
+
+    The usual form is ``from_dict(payload, Session)``. The reversed form,
+    ``from_dict(Session, payload)``, is also accepted for convenience.
+    """
+
+    if isinstance(value, type) and target_type is not None and not isinstance(target_type, type):
+        value, target_type = target_type, value
+    if target_type is None:
+        raise TypeError("from_dict requires a target schema type")
+    return _from_dict(value, target_type)
 
 
 def to_json(value: Any, *, indent: int | None = 2) -> str:
