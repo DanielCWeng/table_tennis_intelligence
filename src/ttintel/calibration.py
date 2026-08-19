@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .geometry import make_calibration, project_image_to_table
+from .geometry import corner_sensitivity_m_per_px, make_calibration, project_image_to_table
 from .schemas import CalibrationSource, Point2D, TableCalibration
 
 
@@ -19,6 +19,11 @@ class CalibrationError(ValueError):
 
 
 CORNER_NAMES = ("near_left", "near_right", "far_right", "far_left")
+# One pixel of corner error must not move a table coordinate by more than the
+# precision an edge call needs.  The table is 1.525 m wide and the sidelines are
+# 2 cm, so 5 cm/px is the point past which a single pixel of corner error
+# exceeds the tolerance for judging a ball near the edge.
+MAX_CORNER_SENSITIVITY_M_PER_PX = 0.05
 AUTOMATIC_QUALITY_THRESHOLD = 0.62
 AUTOMATIC_MIN_EDGE_SUPPORT = 0.45
 AUTOMATIC_MIN_NET_SUPPORT = 0.45
@@ -657,7 +662,17 @@ def calibration_quality(
 
     if quality_score < AUTOMATIC_QUALITY_THRESHOLD and "fixture_colour_detector_unverified" not in failure_reasons:
         failure_reasons.append("quality_score_low")
+
+    # Conditioning is independent of how well the corners match the image: a
+    # view down the table's long axis converges the far corners and amplifies
+    # corner error into large metric error, while the four-point residual
+    # stays ~0 throughout.
+    sensitivity = corner_sensitivity_m_per_px(calibration.image_corners)
+    if sensitivity > MAX_CORNER_SENSITIVITY_M_PER_PX:
+        failure_reasons.append("corner_sensitivity_high")
+
     return {
+        "corner_sensitivity_m_per_px": sensitivity,
         "reprojection_error_px": calibration.reprojection_error_px,
         "corner_confidences": list(calibration.corner_confidences),
         "calibration_source": calibration.source.value,
