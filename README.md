@@ -34,11 +34,11 @@ default pipeline never fabricates model observations. See
 
 ## Install
 
-The schema layer needs only Python 3.10+; geometry and the baseline pipeline
-use NumPy. For development:
+Python 3.10+ and NumPy are required: geometry, perception, scene, events, and
+rendering all import NumPy at module load. For development:
 
 ```powershell
-python -m pip install -e ".[dev,numeric]"
+python -m pip install -e ".[dev]"
 ```
 
 For local video decoding/rendering, install the optional media stack in the

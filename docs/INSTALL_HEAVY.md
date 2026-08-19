@@ -46,7 +46,7 @@ ffprobe -version
 Then install the main-project media and lightweight pose path:
 
 ```powershell
-python -m pip install -e ".[dev,numeric,render]"
+python -m pip install -e ".[dev,render]"
 python -m pip install av opencv-contrib-python rtmlib onnxruntime
 ttintel-doctor --json
 ```

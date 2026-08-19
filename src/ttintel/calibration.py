@@ -97,16 +97,23 @@ def detect_table_corners_heuristic(image: np.ndarray) -> tuple[Point2D, Point2D,
     points = np.column_stack((x.astype(float), y.astype(float)))
     sums = points[:, 0] + points[:, 1]
     diffs = points[:, 0] - points[:, 1]
+    # CORNER_NAMES order is near_left, near_right, far_right, far_left.  Image
+    # +y points down, so the near (camera-side) edge is the bottom of the frame
+    # and the far edge is the top.  Emitting image order here instead would
+    # mirror the table about its centre line and silently negate every
+    # projected +y table coordinate.
+    #
+    # This still assumes the camera sits behind or above the near end.  A view
+    # shot from the far end yields a table rotated by 180 degrees; that case
+    # needs a manual override until an orientation check exists.
     candidates = [
-        points[np.argmin(sums)],  # top-left
-        points[np.argmax(diffs)],  # top-right
-        points[np.argmax(sums)],  # bottom-right
-        points[np.argmin(diffs)],  # bottom-left
+        points[np.argmin(diffs)],  # bottom-left  -> near_left
+        points[np.argmax(sums)],   # bottom-right -> near_right
+        points[np.argmax(diffs)],  # top-right    -> far_right
+        points[np.argmin(sums)],   # top-left     -> far_left
     ]
     result = tuple(Point2D(float(item[0]), float(item[1])) for item in candidates)
     try:
-        # The heuristic order is image clockwise order.  It is usable as a
-        # projective plane, but its table-side orientation must be reviewed.
         return parse_manual_corners(result)
     except CalibrationError:
         return None
