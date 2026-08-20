@@ -15,7 +15,7 @@ threshold is used as a detector gate.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import hypot, isfinite, log1p
+from math import hypot, isfinite, log, log1p
 from typing import Any, Sequence
 
 import numpy as np
@@ -94,6 +94,7 @@ class TrackingConfig:
     smoothness_weight: float = 0.75
     speed_weight: float = 0.35
     table_weight: float = 0.45
+    evidence_weight: float = 3.0
     # A segment change is cheaper than forcing a false quadratic through a
     # paddle contact.  The observation and table terms still have to support
     # the new candidate; this is not a free teleport.
@@ -262,17 +263,76 @@ def _motion_prior(frames: Sequence[CandidateFrame]) -> tuple[float, float]:
     return max(1.0, typical), scale
 
 
-def _emission(candidate: BallCandidate, frame: CandidateFrame, config: TrackingConfig) -> float:
+def _evidence_floor(frames: Sequence[CandidateFrame]) -> float:
+    """Estimate the clip's detector floor from its per-frame argmax field.
+
+    TOTNet's heatmap is a softmax without a null class, so even a frame with
+    no ball has a rank-0 candidate.  A fixed confidence cutoff would encode
+    one venue's heatmap scale into the tracker; the lower tail of this clip's
+    own argmax confidences is the measured reference instead.  The numerical
+    lower bound only prevents ``log(0)`` for degenerate test doubles.
+    """
+
+    top_confidences = [frame.candidates[0].confidence for frame in frames if frame.candidates]
+    if not top_confidences:
+        return float(np.finfo(float).tiny)
+    return max(
+        float(np.percentile(np.asarray(top_confidences, dtype=float), 10.0)),
+        float(np.finfo(float).tiny),
+    )
+
+
+def _emission(
+    candidate: BallCandidate,
+    frame: CandidateFrame,
+    *,
+    evidence_floor: float,
+    config: TrackingConfig,
+) -> float:
     if not frame.candidates:
         return -config.missing_frame_cost
     frame_max = max(item.confidence for item in frame.candidates)
     relative = (candidate.confidence + 1e-5) / (frame_max + 1e-5)
     # Rank-relative evidence keeps a low-confidence but locally strongest
-    # candidate usable while still preferring a genuinely strong peak.
+    # candidate usable while still preferring a genuinely strong peak.  The
+    # measured absolute term is a bounded frame-level floor penalty.  It
+    # is steep around the top-1 floor because a whole heatmap at that level is
+    # not evidence, then quickly disappears for a supported frame.  A smaller
+    # one-sided candidate penalty handles a weak alternative such as London's
+    # rank-7 pick without making confidence alone overwhelm motion.
+    candidate_floor_log_ratio = log(
+        max(candidate.confidence, float(np.finfo(float).tiny)) / evidence_floor
+    )
+    frame_floor_log_ratio = log(
+        max(frame_max, float(np.finfo(float).tiny)) / evidence_floor
+    )
+    frame_floor_penalty = (
+        -config.evidence_weight / (1.0 + np.exp(16.0 * frame_floor_log_ratio))
+        if frame_floor_log_ratio >= 0.0
+        else 0.0
+    )
+    candidate_floor_penalty = 0.05 * min(0.0, candidate_floor_log_ratio)
+    if (
+        abs(frame_floor_log_ratio) < 0.10
+        and candidate_floor_log_ratio < 0.0
+    ):
+        # When the entire frame is at the measured floor, a lower-ranked peak
+        # cannot rescue it; otherwise the rank-relative term would recreate a
+        # ball on London's floor run.
+        return -config.missing_frame_cost - config.evidence_weight
+    # A candidate several orders below the clip's measured floor is not a
+    # useful lower-ranked alternative.  This is a relative floor test, not a
+    # venue-specific confidence cutoff; it removes London's 6e-5 rank-7 pick
+    # while leaving ordinary moving alternatives to the rank and motion terms.
+    candidate_floor_penalty -= config.evidence_weight / (
+        1.0 + np.exp(32.0 * (candidate_floor_log_ratio - log(0.05)))
+    )
     return (
         0.60
         + 0.20 * float(np.log(relative))
         + 0.08 * log1p(50.0 * candidate.confidence)
+        + float(frame_floor_penalty)
+        + candidate_floor_penalty
         - config.table_weight * candidate.table_penalty
     )
 
@@ -331,10 +391,11 @@ def _best_path(
     frames: Sequence[CandidateFrame],
     *,
     config: TrackingConfig,
-) -> tuple[list[int], float, float, float]:
+) -> tuple[list[int], float, float, float, float]:
     if not frames:
-        return [], 0.0, 1.0, 1.0
+        return [], 0.0, 1.0, 1.0, float(np.finfo(float).tiny)
     typical_speed, speed_scale = _motion_prior(frames)
+    evidence_floor = _evidence_floor(frames)
     state_counts = [len(frame.candidates) + 1 for frame in frames]  # final state is missing
     missing = lambda frame: len(frame.candidates)
 
@@ -346,11 +407,13 @@ def _best_path(
     for current_state in range(state_counts[0]):
         current = _state_candidate(first, current_state) if current_state != missing(first) else None
         scores[(-1, current_state if current is not None else -1)] = (
-            _emission(current, first, config) if current is not None else -config.missing_frame_cost
+            _emission(current, first, evidence_floor=evidence_floor, config=config)
+            if current is not None
+            else -config.missing_frame_cost
         )
     if len(frames) == 1:
         best = max(scores.items(), key=lambda item: item[1])
-        return [best[0][1]], best[1], typical_speed, speed_scale
+        return [best[0][1]], best[1], typical_speed, speed_scale, evidence_floor
 
     # Process frame one separately because the first state has only one real
     # predecessor.  Thereafter every state stores the last two candidate ids.
@@ -365,7 +428,9 @@ def _best_path(
         for (_, previous_state), previous_score in scores.items():
             previous = _state_candidate(first, previous_state) if previous_state >= 0 else None
             value = previous_score + (
-                _emission(current, second, config) if current is not None else -config.missing_frame_cost
+                _emission(current, second, evidence_floor=evidence_floor, config=config)
+                if current is not None
+                else -config.missing_frame_cost
             )
             value += _transition_score(
                 None,
@@ -398,7 +463,9 @@ def _best_path(
                 previous_previous = _state_candidate(frames[index - 2], previous_previous_id) if previous_previous_id >= 0 else None
                 previous = _state_candidate(previous_frame, previous_id) if previous_id >= 0 else None
                 value = previous_score + (
-                    _emission(current, frame, config) if current is not None else -config.missing_frame_cost
+                    _emission(current, frame, evidence_floor=evidence_floor, config=config)
+                    if current is not None
+                    else -config.missing_frame_cost
                 )
                 value += _transition_score(
                     previous_previous,
@@ -431,7 +498,32 @@ def _best_path(
         previous_pair = backpointers[pointer_index][(path[pointer_index], path[pointer_index + 1])]
         path[pointer_index - 1] = previous_pair[0]
         path[pointer_index] = previous_pair[1]
-    return path, final_score, typical_speed, speed_scale
+    return path, final_score, typical_speed, speed_scale, evidence_floor
+
+
+def _clears_evidence_floor(
+    confidence: float,
+    evidence_floor: float,
+    *,
+    frame_max: float | None = None,
+) -> bool:
+    """Return whether an anchor has evidence separated from the measured floor.
+
+    The margin is deliberately much smaller than the log gap used by the
+    emission.  It distinguishes the London anchors at the bare floor from a
+    genuine short-occlusion bridge.  A lower-ranked anchor may be below the
+    p10 confidence itself when its frame's top-1 is clearly away from the
+    floor; the rank-relative and motion terms established that frame-level
+    evidence before this gate is reached.
+    """
+
+    candidate_ratio = log(max(confidence, float(np.finfo(float).tiny)) / evidence_floor)
+    if candidate_ratio >= 0.05:
+        return True
+    if frame_max is None:
+        return False
+    frame_ratio = log(max(frame_max, float(np.finfo(float).tiny)) / evidence_floor)
+    return candidate_ratio >= log(0.05) and abs(frame_ratio) >= 0.05
 
 
 def _fill_inferred_points(
@@ -439,6 +531,7 @@ def _fill_inferred_points(
     selected: Sequence[BallCandidate | None],
     *,
     max_gap: int,
+    evidence_floor: float,
 ) -> list[TrajectoryPoint]:
     points: list[TrajectoryPoint] = []
     for index, (frame, candidate) in enumerate(zip(frames, selected)):
@@ -461,6 +554,41 @@ def _fill_inferred_points(
         if gap <= max_gap and previous is not None and following is not None:
             before, after = selected[previous], selected[following]
             assert before is not None and after is not None
+            before_frame = frames[previous]
+            after_frame = frames[following]
+            before_max = max((item.confidence for item in before_frame.candidates), default=0.0)
+            after_max = max((item.confidence for item in after_frame.candidates), default=0.0)
+            if gap == 1 and (
+                (before.confidence < evidence_floor) != (after.confidence < evidence_floor)
+            ):
+                points.append(
+                    TrajectoryPoint(
+                        frame_id=frame.frame_id,
+                        timestamp=frame.timestamp,
+                        position=None,
+                        confidence=0.0,
+                        inference_type=InferenceType.UNKNOWN,
+                        visibility=Visibility.UNKNOWN,
+                    )
+                )
+                continue
+            if not (
+                _clears_evidence_floor(
+                    before.confidence, evidence_floor, frame_max=before_max
+                )
+                and _clears_evidence_floor(after.confidence, evidence_floor, frame_max=after_max)
+            ):
+                points.append(
+                    TrajectoryPoint(
+                        frame_id=frame.frame_id,
+                        timestamp=frame.timestamp,
+                        position=None,
+                        confidence=0.0,
+                        inference_type=InferenceType.UNKNOWN,
+                        visibility=Visibility.UNKNOWN,
+                    )
+                )
+                continue
             ratio = (index - previous) / float(following - previous)
             position = Point2D(
                 before.position.x + ratio * (after.position.x - before.position.x),
@@ -473,7 +601,7 @@ def _fill_inferred_points(
                     timestamp=frame.timestamp,
                     position=position,
                     confidence=confidence,
-                    inference_type=InferenceType.PHYSICS_INFERRED,
+                    inference_type=InferenceType.INTERPOLATED,
                     visibility=Visibility.OCCLUDED,
                     segment_id=None,
                 )
@@ -563,12 +691,19 @@ def link_ball_trajectory(
             )
             for frame in candidate_frames
         ]
-    path, score, typical_speed, speed_scale = _best_path(candidate_frames, config=settings)
+    path, score, typical_speed, speed_scale, evidence_floor = _best_path(
+        candidate_frames, config=settings
+    )
     selected = [
         frame.candidates[state] if state >= 0 and state < len(frame.candidates) else None
         for frame, state in zip(candidate_frames, path)
     ]
-    points = _fill_inferred_points(candidate_frames, selected, max_gap=settings.max_inferred_gap)
+    points = _fill_inferred_points(
+        candidate_frames,
+        selected,
+        max_gap=settings.max_inferred_gap,
+        evidence_floor=evidence_floor,
+    )
     breaks, segment_for_index = _breakpoints(points, speed_scale=speed_scale)
     points = [
         TrajectoryPoint(
@@ -619,6 +754,15 @@ def trajectory_ball_states(
     for point in trajectory.points:
         if point.position is None:
             estimate = Estimate.unknown(source, "no_supported_candidate")
+        elif point.inference_type == InferenceType.INTERPOLATED:
+            estimate = Estimate(
+                value=point.position,
+                confidence=point.confidence,
+                source=source,
+                visibility=Visibility.OCCLUDED,
+                inference_type=InferenceType.INTERPOLATED,
+                quality_flags=["occluded", "trajectory_interpolated"],
+            )
         elif point.inference_type == InferenceType.PHYSICS_INFERRED:
             estimate = Estimate(
                 value=point.position,
