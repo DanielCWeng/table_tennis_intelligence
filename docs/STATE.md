@@ -1,6 +1,7 @@
 # Current state
 
-Last updated: 2026-08-18, at commit `bf19a32`.
+Last updated: 2026-08-20, at commit `84b5f19` on `main`, plus the branch
+`wip/trajectory-linking` at `fa7aa8b` where noted.
 
 This is the single "where things actually are" file. Where it disagrees with
 another document, this one is right and the other is stale. Every claim below
@@ -163,21 +164,109 @@ than a whole match shot end-on.
 
 ## Ordering
 
-1. Multi-hypothesis trajectory linking (in flight, see below).
-2. Ground truth. Four clicks per clip gives calibration truth; sparse
+1. Ground truth. Four clicks per clip gives calibration truth; sparse
    per-frame ball labels give tracker error rates. Nothing above becomes an
-   error rate until this exists.
-3. Wire TOTNet as the pipeline default once linking is proven.
+   error rate until this exists, including the entropy signal below, which is
+   currently supported by hand-labelled frames from one dead run.
+2. Merge `wip/trajectory-linking`. It is measured and visually inspected on both
+   broadcast clips; what remains is a decision about frame 36 rather than more
+   tuning.
+3. Wire TOTNet as the pipeline default once linking is merged.
 4. Cut and replay detection, before any full-match footage is trusted.
 5. Pose, via rtmlib — the adapter exists and has never been exercised.
 
-## In flight
+## Offline trajectory linking: measured, on a branch, not merged
 
-A Codex job is building `src/ttintel/tracking.py`: top-k heatmap candidates,
-motion-gated multi-hypothesis linking solved over the whole clip offline, and
-piecewise fitting whose breakpoints become bounce and contact candidates. It
-also touches `adapters/totnet.py` and `events.py`. Not yet reviewed, verified,
-or committed at the time of writing.
+`src/ttintel/tracking.py` on `wip/trajectory-linking` (head `fa7aa8b`) keeps the
+top-k heatmap candidates and chooses a path over the whole clip with a
+second-order dynamic program. It has now been run against real footage and
+inspected frame by frame in annotated montages, not just scored.
+
+Comparing the linked path with the rank-0 argmax path that `main` uses today,
+over 200 frames of Frankfurt, all 100 of London and 200 of the club clip:
+
+| | argmax | linked |
+| --- | --- | --- |
+| Frankfurt, jumps over 120 px | 60 / 199 | 4 / 190 |
+| Frankfurt, median displacement | 63.7 px | 42.5 px |
+| London, jumps over 120 px | 15 / 99 | 3 / 76 |
+
+**It works on broadcast footage.** On Frankfurt the marker sits on the
+motion-blurred ball through an entire rally; the frames it abstains on are the
+ones where the ball is genuinely out of shot. On London it rejects the shirt
+logo at frame 63 — the distractor that sits inside the real-ball confidence band
+and that no confidence threshold can remove — and picks the ball at the racket
+instead. That is the specific win the whole approach was for.
+
+**It does not fix the club clip and is not expected to.** That failure is a
+detector problem, not a linking problem: 24 consecutive frames park on the
+sports-hall balcony under both the argmax and the linked path. The club clip is
+deliberately not an acceptance criterion for this work.
+
+**It could invent a ball where the detector had none, and now mostly does not.**
+TOTNet's head is a softmax over the whole heatmap with no null class, so a frame
+containing no ball still produces an argmax — on London, 17 of 100 frames are
+pure noise at ~0.0015. Linking originally bridged eight of those into a smooth,
+entirely fictional trajectory across the floor, emitted as tracked positions.
+Gating interpolation on anchor evidence removed the bridge; frames 8 and 10
+survive as isolated stray points that no longer connect into a path. Of the 17
+no-signal frames, 3 still carry a position, down from 9.
+
+Linear interpolation between two selected points is now reported as
+`InferenceType.INTERPOLATED` rather than `PHYSICS_INFERRED`. No physics is
+involved and the old label contradicted the coordinate rules in
+ARCHITECTURE.md.
+
+### What was tried here and removed
+
+An absolute-confidence floor in the emission term, estimated as a per-clip 10th
+percentile of the argmax confidence. It bought two London frames and nothing on
+Frankfurt, in exchange for hand-fitted sigmoids — slopes of 16 and 32 in
+log-ratio space, a band, an offset — which are step functions with soft edges,
+the confidence-space form of the fixed detector gate `tracking.py` disclaims in
+its own docstring.
+
+It also only worked by accident. The band fires when a frame's top-1 sits within
+about 10% of the clip's own 10th percentile, which catches London because its
+dead run is pinned at a constant 0.0015 that then *becomes* that percentile.
+That is one clip's pathology, not a test for absence. `tests/test_tracking.py`
+keeps the case as a strict `xfail` so the missing capability stays visible.
+
+The percentile is retained where it was measured to be safe: gating
+interpolation anchors only. Replacing that gate's log-ratio margins with a plain
+"anchor must reach the floor" test costs Frankfurt 18 positioned frames, so the
+margins are load-bearing.
+
+### The open failure, and why confidence cannot close it
+
+London frame 36 selects a rank-7 candidate at 0.00063 on empty table, under
+every variant tried. Absolute confidence cannot separate it from a genuine weak
+detection, because the scale is not comparable between clips: London's detector
+floor is 0.0015 and Frankfurt's is 0.027, and London's real ball sits at
+0.13-0.16 while Frankfurt's sits at 0.026.
+
+A candidate signal was measured: the **entropy of the top-k confidences within
+one frame**, on the theory that a no-signal frame yields a diffuse softmax while
+a real detection yields a dominant peak even when its absolute value is low.
+
+| Group | n | entropy range | top-1 range |
+| --- | --- | --- | --- |
+| Diffuse noise (London 0-15) | 16 | 1.759 - 1.808 | 0.0015 - 0.0016 |
+| Weak real ball (Frankfurt) | 8 | 0.907 - 1.537 | 0.0122 - 0.0350 |
+| Distractor lock (Frankfurt) | 16 | 1.277 - 1.880 | 0.0098 - 0.0341 |
+
+Entropy separates diffuse noise from a weak real ball cleanly, and unlike
+confidence its scale looks comparable across the two clips. It does **not**
+separate a distractor lock from a real ball, and cannot: a logo produces a
+genuinely concentrated peak. So concentration is a candidate abstention signal
+for "there is nothing here", and is no help at all for frames 36 and 63, which
+need motion — which is what the linker already supplies.
+
+This is a lead, not a result, and it is not in the code. The three groups were
+hand-labelled from one montage over two clips, and the 16 noise frames are a
+single contiguous dead run pinned at one confidence value, so they are closer to
+one observation than to sixteen. Confirming it needs the ground truth in
+"Ordering" below, not another eyeball pass.
 
 ## Known defects recorded but not fixed
 
