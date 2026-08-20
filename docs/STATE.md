@@ -1,7 +1,7 @@
 # Current state
 
-Last updated: 2026-08-20, at commit `84b5f19` on `main`, plus the branch
-`wip/trajectory-linking` at `fa7aa8b` where noted.
+Last updated: 2026-08-20, at commit `27603a8` on `main`, plus the branch
+`feat/labeller-gui` at `fde84c7` where noted.
 
 This is the single "where things actually are" file. Where it disagrees with
 another document, this one is right and the other is stale. Every claim below
@@ -11,7 +11,10 @@ is backed by a measurement taken against real footage, not an intention.
 
 Python 3.13.5 on native Windows 11. Torch 2.6.0+cu124 with CUDA available on
 an RTX 3060 Laptop (6 GB). PyAV 18, OpenCV 5.0, Pillow 11.3, NumPy 2.2.6,
-rtmlib, onnxruntime 1.28, duckdb 1.5.2, pyarrow 21. MMPose/MMEngine/MMCV/MMDet
+rtmlib, onnxruntime 1.28, duckdb 1.5.2, pyarrow 21. **The onnxruntime build is
+CPU-only** — its providers are Azure and CPU, with no `CUDAExecutionProvider`.
+Torch having CUDA does not mean ONNX does; pose would run on CPU, and the CLI's
+`--pose-device cuda` default cannot be honoured. MMPose/MMEngine/MMCV/MMDet
 are absent. TOTNet's 12 checkpoints (2.0 GB) and TT3D's
 `table_segmentation.ckpt` are present under `third_party/`.
 
@@ -52,6 +55,15 @@ frames, median displacement 38.8 px/frame, one jump over 300 px in 59
 transitions, visually confirmed following the ball across a rally. This
 replaced a bright-blob baseline that reported a ball in 100/100 frames at 0.75
 confidence while locked onto static floor advertising.
+
+**TOTNet is the pipeline default.** `analyse_video` now builds
+`TOTNetBallTracker`; `--ball-tracker {totnet,blob,none}` is an explicit opt-out
+and there is no automatic fallback, because silently downgrading to a detector
+documented as broken is worse than not running. A missing checkpoint exits 2
+naming the path. Measured on London's first 40 frames: the default reports
+`totnet.ball_tracker` with ball availability 0.60, abstaining across the
+16-frame dead run at the clip start, while `--ball-tracker blob` reports 1.00 —
+a ball in every frame, which is the baseline's documented pathology.
 
 **Session persistence.** Sessions round-trip to typed objects. `raw/` and
 `cleaned/` carry data instead of being empty directories. `session.json` is a
@@ -108,9 +120,6 @@ coordinate rules in ARCHITECTURE.md.
 **No ground truth.** `benchmark.py` has nothing to score against. Every
 assessment above is a measurement plus visual inspection, not an error rate.
 
-**Pipeline default.** `analyse_video` still uses the bright-blob tracker.
-TOTNet is injectable via `DefaultPerceptionProvider(ball_tracker=...)` but is
-not the default path.
 
 ## Quality signals: what survived testing
 
@@ -164,23 +173,27 @@ than a whole match shot end-on.
 
 ## Ordering
 
-1. Ground truth. Four clicks per clip gives calibration truth; sparse
-   per-frame ball labels give tracker error rates. Nothing above becomes an
-   error rate until this exists, including the entropy signal below, which is
-   currently supported by hand-labelled frames from one dead run.
-2. Merge `wip/trajectory-linking`. It is measured and visually inspected on both
-   broadcast clips; what remains is a decision about frame 36 rather than more
-   tuning.
-3. Wire TOTNet as the pipeline default once linking is merged.
+1. Fix the labeller's overlay calibration bug (see below), then merge
+   `feat/labeller-gui`.
+2. Ground truth, using that tool. Four clicks per clip gives calibration truth;
+   sparse per-frame ball labels give tracker error rates. Nothing in this
+   document becomes an error rate until this exists, including the entropy
+   signal above, which currently rests on hand-labelled frames from one dead
+   run.
+3. Frame 36. It is wrong under every variant tried and wrong on the argmax path
+   too. Ground truth decides whether it is a 1-in-100 event or a 1-in-10 one,
+   which decides whether it is worth chasing at all.
 4. Cut and replay detection, before any full-match footage is trusted.
-5. Pose, via rtmlib — the adapter exists and has never been exercised.
+5. Pose, via rtmlib — never executed. Note the CPU-only onnxruntime above: on
+   this hardware a whole-body model runs per frame on CPU, which probably
+   settles the question before it is asked.
 
-## Offline trajectory linking: measured, on a branch, not merged
+## Offline trajectory linking: measured, inspected, merged
 
-`src/ttintel/tracking.py` on `wip/trajectory-linking` (head `fa7aa8b`) keeps the
+`src/ttintel/tracking.py` keeps the
 top-k heatmap candidates and chooses a path over the whole clip with a
-second-order dynamic program. It has now been run against real footage and
-inspected frame by frame in annotated montages, not just scored.
+second-order dynamic program. It was run against real footage and inspected
+frame by frame in annotated montages, not just scored, before merging.
 
 Comparing the linked path with the rank-0 argmax path that `main` uses today,
 over 200 frames of Frankfurt, all 100 of London and 200 of the club clip:
@@ -267,6 +280,49 @@ hand-labelled from one montage over two clips, and the 16 noise frames are a
 single contiguous dead run pinned at one confidence value, so they are closer to
 one observation than to sixteen. Confirming it needs the ground truth in
 "Ordering" below, not another eyeball pass.
+
+## Ground-truth labeller: on a branch, one blocking bug
+
+`src/ttintel/labeller.py` on `feat/labeller-gui` (head `fde84c7`) is a local
+browser tool for producing the ground truth item 2 of Ordering needs. It exists
+because `calibration.save_manual_corners` had no callers: the CLI accepts
+`--manual-corners` and `load_manual_corners` reads the file, but nothing could
+write one except a human editing JSON. That matters most for the club clip,
+where automatic calibration correctly fails on all 12 sampled frames.
+
+It scrubs frames by `FramePacket.frame_id`, zooms, records a ball position or an
+explicit "no ball visible" — absence is a first-class label, because a tracker
+inventing a ball where there is none cannot be scored otherwise — and writes
+corners through `save_manual_corners` so the result is loadable by the CLI by
+construction. Labels live in `data/labels/<video_id>.*.json`, committed and keyed
+by the stable id from `media._video_id`, not by an absolute path.
+
+Verified by driving the running server: clearing a label returns a frame to
+untouched rather than to absent (they are different states), undo works, counts
+stay correct, `--host` is honoured with a warning past loopback, and the tracker
+overlay distinguishes off, running, ready, and unavailable.
+
+**The blocking bug.** `compute_tracker_overlay` passes `calibration=None` unless
+manual corners already exist. It never calls `calibrate_consensus`, so on first
+open the overlay runs the linker with no table prior and shows a materially
+worse path while attributing it to `totnet.ball_tracker.viterbi`:
+
+| | overlay, no calibration | pipeline, consensus |
+| --- | --- | --- |
+| positions | 99/100 | 77/100 |
+| frame 0 | (250.0, 286.2) at 0.00067 | none |
+| frame 63 | (176.2, 155.0) rank 0 at 0.109 | (213.8, 170.0) rank 2 at 0.0024 |
+
+Frame 63's (176, 155) is the shirt-back logo — the exact distractor the linking
+work was built to reject. Without the table prior nothing penalises a candidate
+sitting off the table, so the logo wins on confidence. In a tool whose purpose is
+establishing what is true, displaying a degraded path under authoritative
+provenance is the worst available failure. Fix before merging.
+
+Two smaller notes: the tool holds the model resident on the GPU after a pass, so
+a 6 GB card cannot host a second consumer at the same time; and the header reads
+`Frame 26` while the footer reads `27 / 100`, which is frame id versus 1-based
+position.
 
 ## Known defects recorded but not fixed
 
