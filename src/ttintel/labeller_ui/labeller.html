@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TT Intel · Frame Labeller</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='labeller.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">TT INTEL / GROUND TRUTH</div>
+        <h1>Frame labeller</h1>
+        <p class="subhead" id="video-name">Loading indexed frames…</p>
+      </div>
+      <div class="top-status"><span class="status-dot"></span><span>Local only</span></div>
+    </header>
+
+    <section class="workspace">
+      <div class="viewer-card card">
+        <div class="viewer-head">
+          <div class="frame-readout"><span class="eyebrow">CURRENT FRAME</span><strong id="frame-id">—</strong><span id="timestamp">—</span></div>
+          <div class="mode-switch" role="group" aria-label="Labelling mode">
+            <button class="mode active" data-mode="ball">Ball</button>
+            <button class="mode" data-mode="corners">Corners</button>
+          </div>
+        </div>
+        <div class="canvas-wrap" id="canvas-wrap">
+          <canvas id="frame-canvas" width="960" height="540" aria-label="Video frame labelling canvas"></canvas>
+          <div class="canvas-hint" id="canvas-hint">Click the ball · press N when it is not visible</div>
+        </div>
+        <div class="transport">
+          <button class="icon-button" id="prev-frame" title="Previous frame (left arrow)">‹</button>
+          <input id="scrubber" type="range" min="0" max="0" value="0" step="1" aria-label="Frame scrubber">
+          <button class="icon-button" id="next-frame" title="Next frame (right arrow)">›</button>
+          <span class="frame-count" id="frame-count">— / —</span>
+        </div>
+        <div class="zoom-row">
+          <span class="eyebrow">ZOOM</span><input id="zoom" type="range" min="1" max="4" value="1" step="0.25" aria-label="Zoom"><span id="zoom-value">1×</span>
+          <span class="zoom-tip">Move the pointer over the ball to bring that area into view.</span>
+        </div>
+      </div>
+
+      <aside class="sidebar">
+        <section class="card controls-card">
+          <div class="section-title"><span>Labelling</span><span class="pill" id="mode-pill">BALL</span></div>
+          <p id="instruction">Place the marker at the ball centre. Click again to replace.</p>
+          <button class="absent-button" id="absent-button"><span class="keycap">N</span> No ball visible</button>
+          <p class="microcopy">This is an explicit label, not an untouched frame. It is saved immediately.</p>
+          <div class="last-action" id="last-action">Ready for a decision.</div>
+        </section>
+
+        <section class="card progress-card">
+          <div class="section-title"><span>Coverage</span><span id="coverage-percent">0%</span></div>
+          <div class="progress-track"><div id="coverage-bar"></div></div>
+          <div class="stat-grid">
+            <div><strong id="labelled-count">0</strong><span>labelled</span></div>
+            <div><strong id="point-count">0</strong><span>ball points</span></div>
+            <div><strong id="absent-count">0</strong><span>no ball</span></div>
+            <div><strong id="untouched-count">0</strong><span>untouched</span></div>
+          </div>
+        </section>
+
+        <section class="card overlay-card">
+          <div class="section-title"><span>Overlays</span><span class="pill muted">OPTIONAL</span></div>
+          <label class="check-row"><input type="checkbox" id="calibration-toggle"><span class="swatch auto"></span><span>Automatic corners</span></label>
+          <label class="check-row"><input type="checkbox" id="manual-toggle" checked><span class="swatch human"></span><span>Saved corners / labels</span></label>
+          <div class="tracker-row"><span class="swatch tracker"></span><span>Sequential tracker</span><button class="small-button" id="tracker-button">Compute</button></div>
+          <p class="microcopy" id="tracker-status">Off at startup. Computing runs once over the clip and caches the result.</p>
+          <div class="legend"><span><i class="legend-dot human"></i>human</span><span><i class="legend-dot auto"></i>heuristic</span><span><i class="legend-dot tracker"></i>tracker</span></div>
+        </section>
+
+        <section class="card file-card">
+          <div class="section-title"><span>Saved alongside clip</span></div>
+          <div class="file-line"><span>Ball labels</span><code id="labels-path">—</code></div>
+          <div class="file-line"><span>Corner file</span><code id="corners-path">—</code></div>
+          <p class="microcopy">Re-open this clip to continue. Corner order is near-left, near-right, far-right, far-left.</p>
+        </section>
+      </aside>
+    </section>
+    <footer class="footer">Arrow keys navigate · <span class="keycap">N</span> marks no ball · labels are written as you work</footer>
+  </main>
+  <script src="{{ url_for('static', filename='labeller.js') }}"></script>
+</body>
+</html>
