@@ -271,6 +271,7 @@ class LabellerState:
                 }
         else:
             self.labels = {}
+        self._label_history: list[tuple[int, BallLabel | None]] = []
         self._tracker: dict[int, Any] = {}
         self._tracker_status = "off"
         self._tracker_message = "Tracker overlay is off until you request a sequential pass."
@@ -321,11 +322,56 @@ class LabellerState:
                     raise ValueError("point coordinates must be finite")
                 if not (0.0 <= label.point.x <= record.width and 0.0 <= label.point.y <= record.height):
                     raise ValueError("point must be inside the frame")
+            previous = self.labels.get(record.frame_id)
             self.labels[record.frame_id] = label
             save_labels(
                 self.labels_path,
                 LabelSet(self.store.video.name, dict(self.labels), video_id=self.video_id),
             )
+            self._label_history.append((record.frame_id, previous))
+
+    def clear_label(self, frame_id: int) -> bool:
+        """Clear one frame's decision, returning it to the untouched state."""
+
+        with self._lock:
+            record = self.store.get(frame_id)
+            previous = self.labels.get(record.frame_id)
+            if previous is None:
+                return False
+            del self.labels[record.frame_id]
+            save_labels(
+                self.labels_path,
+                LabelSet(self.store.video.name, dict(self.labels), video_id=self.video_id),
+            )
+            self._label_history.append((record.frame_id, previous))
+            return True
+
+    def undo_last_label(self) -> int | None:
+        """Undo the most recent label mutation and persist the restored state."""
+
+        with self._lock:
+            if not self._label_history:
+                return None
+            frame_id, previous = self._label_history.pop()
+            current = self.labels.get(frame_id)
+            if previous is None:
+                self.labels.pop(frame_id, None)
+            else:
+                self.labels[frame_id] = previous
+            try:
+                save_labels(
+                    self.labels_path,
+                    LabelSet(self.store.video.name, dict(self.labels), video_id=self.video_id),
+                )
+            except Exception:
+                # Keep the in-memory state and history aligned if persistence fails.
+                if current is None:
+                    self.labels.pop(frame_id, None)
+                else:
+                    self.labels[frame_id] = current
+                self._label_history.append((frame_id, previous))
+                raise
+            return frame_id
 
     def save_corners(self, corners: Sequence[Point2D]) -> None:
         # This call is intentionally the producer for the CLI's existing
@@ -367,6 +413,8 @@ class LabellerState:
             "auto_corner_sensitivity_m_per_px": auto_sensitivity,
             "manual_corners": _corners_dict(self.manual_corners),
             "tracker": _estimate_payload(tracker.image) if tracker is not None else None,
+            "tracker_status": self._tracker_status,
+            "tracker_message": self._tracker_message,
         }
 
     def compute_tracker_overlay(self) -> dict[str, Any]:
@@ -464,6 +512,26 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
 
+    @app.post("/api/labels/clear")
+    def clear_label() -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            frame_id = int(payload["frame_id"])
+            cleared = state.clear_label(frame_id)
+            return jsonify({"ok": True, "cleared": cleared, "frame": state.frame_payload(frame_id)})
+        except (KeyError, TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    @app.post("/api/labels/undo")
+    def undo_label() -> Any:
+        try:
+            frame_id = state.undo_last_label()
+            if frame_id is None:
+                return jsonify({"error": "no labelling action to undo"}), 409
+            return jsonify({"ok": True, "frame_id": frame_id, "frame": state.frame_payload(frame_id)})
+        except (OSError, RuntimeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+
     @app.post("/api/corners")
     def corners() -> Any:
         payload = request.get_json(silent=True) or {}
@@ -496,14 +564,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open-browser", action="store_true")
     args = parser.parse_args(argv)
-    if args.host not in {"127.0.0.1", "localhost"}:
-        parser.error("the labeller binds to localhost only")
     app = create_app(args.video, labels_path=args.labels, corners_path=args.corners)
-    url = f"http://127.0.0.1:{args.port}/"
+    url_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
+    url = f"http://{url_host}:{args.port}/"
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        print(f"WARNING: --host {args.host} exposes the labeller beyond loopback.", flush=True)
     print(f"ttintel labeller listening at {url}", flush=True)
     if not args.no_open_browser:
         webbrowser.open(url)
-    app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

@@ -90,6 +90,62 @@ def test_server_handlers_persist_labels_and_write_loadable_corners(tmp_path: Pat
     assert reloaded_session["manual_corners"][0] == {"x": 3.0, "y": 15.0}
 
 
+def test_clear_and_undo_persist_point_and_absence_states(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    labels_path = tmp_path / "labels.json"
+    app = create_app(store.video, frame_store=store, labels_path=labels_path)
+    client = app.test_client()
+
+    assert client.post(
+        "/api/labels",
+        json={"frame_id": 4, "label": "point", "x": 12.5, "y": 8.25},
+    ).status_code == 200
+    assert client.post("/api/labels", json={"frame_id": 7, "label": "absent"}).status_code == 200
+
+    cleared_point = client.post("/api/labels/clear", json={"frame_id": 4})
+    assert cleared_point.status_code == 200
+    assert cleared_point.get_json()["cleared"] is True
+    assert cleared_point.get_json()["frame"]["label"] is None
+    assert client.get("/api/session").get_json()["counts"] == {
+        "labelled": 1,
+        "point": 0,
+        "absent": 1,
+        "untouched": 1,
+    }
+    assert 4 not in load_labels(labels_path).labels
+
+    undone_point = client.post("/api/labels/undo")
+    assert undone_point.status_code == 200
+    assert undone_point.get_json()["frame"]["label"] == {"label": "point", "x": 12.5, "y": 8.25}
+
+    cleared_absence = client.post("/api/labels/clear", json={"frame_id": 7})
+    assert cleared_absence.status_code == 200
+    assert cleared_absence.get_json()["frame"]["label"] is None
+    assert client.get("/api/session").get_json()["counts"] == {
+        "labelled": 1,
+        "point": 1,
+        "absent": 0,
+        "untouched": 1,
+    }
+
+    undone_absence = client.post("/api/labels/undo")
+    assert undone_absence.status_code == 200
+    assert undone_absence.get_json()["frame"]["label"] == {"label": "absent"}
+    assert client.get("/api/session").get_json()["counts"] == {
+        "labelled": 2,
+        "point": 1,
+        "absent": 1,
+        "untouched": 0,
+    }
+
+    assert client.post("/api/labels/clear", json={"frame_id": 4}).get_json()["cleared"] is True
+    assert client.post("/api/labels/clear", json={"frame_id": 4}).get_json()["cleared"] is False
+    assert client.post("/api/labels/undo").status_code == 200
+    assert client.post("/api/labels/undo").status_code == 200
+    assert client.post("/api/labels/undo").status_code == 200
+    assert client.post("/api/labels/undo").status_code == 409
+
+
 def test_default_storage_is_repo_label_dir_keyed_by_video_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"stable fixture bytes")
@@ -118,3 +174,19 @@ def test_default_storage_is_repo_label_dir_keyed_by_video_id(tmp_path: Path, mon
     corner_payload = json.loads(corner_path.read_text())
     assert corner_payload["video_id"] == video_id
     assert corner_payload["source_filename"] == "clip.mp4"
+
+
+def test_main_honors_explicit_host_and_warns_about_exposure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeApp:
+        def run(self, **kwargs: object) -> None:
+            calls.update(kwargs)
+
+    monkeypatch.setattr(labeller_module, "create_app", lambda *args, **kwargs: FakeApp())
+    labeller_module.main(
+        [str(tmp_path / "clip.mp4"), "--host", "0.0.0.0", "--port", "9876", "--no-open-browser"]
+    )
+
+    assert calls == {"host": "0.0.0.0", "port": 9876, "debug": False, "threaded": True}
+    assert "WARNING: --host 0.0.0.0 exposes the labeller beyond loopback." in capsys.readouterr().out

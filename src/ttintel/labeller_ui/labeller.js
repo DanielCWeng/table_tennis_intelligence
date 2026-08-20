@@ -3,7 +3,8 @@
   const ctx = canvas.getContext('2d');
   const state = {
     frameIds: [], index: 0, image: null, meta: null, zoom: 1,
-    focus: { x: 0, y: 0 }, mode: 'ball', overlay: 'none', cornerClicks: []
+    focus: { x: 0, y: 0 }, mode: 'ball', overlay: 'none', cornerClicks: [],
+    tracker: { status: 'off', message: '' }
   };
   const $ = (id) => document.getElementById(id);
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -83,7 +84,9 @@
     const wantsTable = state.overlay === 'detections' || state.overlay === 'table';
     const response = await fetch(`/api/frame/${currentId()}?calibration=${wantsTable ? 1 : 0}`);
     if (!response.ok) throw new Error('frame metadata unavailable');
-    state.meta = await response.json(); render(); updateHint();
+    state.meta = await response.json();
+    state.tracker = { status: state.meta.tracker_status, message: state.meta.tracker_message };
+    render(); updateHint(); updateOverlayStatus();
   }
   async function loadFrame(index) {
     state.index = clamp(Number(index), 0, state.frameIds.length - 1);
@@ -95,6 +98,22 @@
       ? `Corner ${state.cornerClicks.length + 1} of 4: near-left, near-right, far-right, far-left`
       : 'Click the ball; press N when it is not visible';
   }
+  function updateOverlayStatus() {
+    if (state.overlay !== 'detections' && state.overlay !== 'ball') return;
+    let message;
+    if (state.tracker.status === 'ready') {
+      message = state.meta && state.meta.tracker && state.meta.tracker.point
+        ? 'Tracker pass computed; ball detection shown in red.'
+        : 'Tracker pass computed; no ball detection for this frame.';
+    } else if (state.tracker.status === 'running') {
+      message = 'Tracker pass is running; wait for it to finish.';
+    } else if (state.tracker.status === 'unavailable') {
+      message = `Tracker unavailable: ${state.tracker.message || 'click retry tracker.'}`;
+    } else {
+      message = 'Tracker not computed. Click “compute tracker” to enable this overlay.';
+    }
+    setAction(message);
+  }
   function updateCoverage(counts) {
     $('labelled-count').textContent = counts.labelled; $('point-count').textContent = counts.point;
     $('absent-count').textContent = counts.absent; $('untouched-count').textContent = counts.untouched;
@@ -103,7 +122,21 @@
     const payload = { frame_id: currentId(), label }; if (point) Object.assign(payload, point);
     const response = await fetch('/api/labels', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const result = await response.json(); if (!response.ok) throw new Error(result.error || 'could not save label');
-    state.meta = result.frame; updateCoverage((await (await fetch('/api/session')).json()).counts); render();
+    state.meta = result.frame; updateCoverage((await (await fetch('/api/session')).json()).counts); render(); updateOverlayStatus();
+  }
+  async function clearLabel() {
+    const response = await fetch('/api/labels/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frame_id: currentId() }) });
+    const result = await response.json(); if (!response.ok) throw new Error(result.error || 'could not clear label');
+    state.meta = result.frame; updateCoverage((await (await fetch('/api/session')).json()).counts); render(); updateOverlayStatus();
+    setAction(result.cleared ? 'Current frame label cleared; frame is untouched.' : 'Current frame was already untouched.');
+  }
+  async function undoLabel() {
+    const response = await fetch('/api/labels/undo', { method: 'POST' });
+    const result = await response.json(); if (!response.ok) throw new Error(result.error || 'could not undo label');
+    updateCoverage((await (await fetch('/api/session')).json()).counts);
+    if (result.frame_id === currentId()) state.meta = result.frame; else await fetchMeta();
+    render(); updateOverlayStatus();
+    setAction(`Undid the last label on frame ${result.frame_id}.`);
   }
   async function saveCorners() {
     const response = await fetch('/api/corners', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ corners: state.cornerClicks }) });
@@ -125,20 +158,22 @@
     } catch (error) { setAction(error.message); }
   });
   $('absent-button').addEventListener('click', async () => { try { await saveLabel('absent'); setAction('Explicit human no-ball label saved.'); } catch (error) { setAction(error.message); } });
+  $('clear-button').addEventListener('click', async () => { try { await clearLabel(); } catch (error) { setAction(error.message); } });
+  $('undo-button').addEventListener('click', async () => { try { await undoLabel(); } catch (error) { setAction(error.message); } });
   $('scrubber').addEventListener('input', (event) => loadFrame(event.target.value).catch((error) => setAction(error.message)));
   $('prev-frame').addEventListener('click', () => loadFrame(state.index - 1)); $('next-frame').addEventListener('click', () => loadFrame(state.index + 1));
   $('zoom').addEventListener('input', (event) => { state.zoom = Number(event.target.value); $('zoom-value').textContent = `${state.zoom}x`; render(); });
-  $('overlay-select').addEventListener('change', () => { state.overlay = $('overlay-select').value; fetchMeta().catch((error) => setAction(error.message)); });
+  $('overlay-select').addEventListener('change', () => { state.overlay = $('overlay-select').value; updateOverlayStatus(); fetchMeta().catch((error) => setAction(error.message)); });
   $('mode-select').addEventListener('change', () => { state.mode = $('mode-select').value; state.cornerClicks = []; $('absent-button').style.display = state.mode === 'corners' ? 'none' : ''; $('instruction').textContent = state.mode === 'corners' ? 'Click table corners in the numbered order shown on the frame.' : 'Place the label at the ball centre. Click again to replace.'; updateHint(); render(); });
   $('tracker-button').addEventListener('click', async () => {
-    const button = $('tracker-button'); button.disabled = true; button.textContent = 'running...'; $('tracker-status').textContent = 'sequential pass in progress';
-    try { const response = await fetch('/api/tracker-overlay', { method: 'POST' }); const result = await response.json(); if (!response.ok) throw new Error(result.message || 'tracker unavailable'); button.textContent = 'tracker ready'; $('tracker-status').textContent = `${result.count} cached frame outputs`; await fetchMeta(); }
-    catch (error) { button.disabled = false; button.textContent = 'retry tracker'; $('tracker-status').textContent = error.message; }
+    const button = $('tracker-button'); button.disabled = true; button.textContent = 'running...'; $('tracker-status').textContent = 'sequential pass in progress'; state.tracker = { status: 'running', message: 'sequential pass in progress' }; updateOverlayStatus();
+    try { const response = await fetch('/api/tracker-overlay', { method: 'POST' }); const result = await response.json(); state.tracker = { status: result.status, message: result.message || '' }; if (!response.ok) throw new Error(result.message || 'tracker unavailable'); button.textContent = 'tracker ready'; $('tracker-status').textContent = `${result.count} cached frame outputs`; await fetchMeta(); }
+    catch (error) { button.disabled = false; button.textContent = 'retry tracker'; $('tracker-status').textContent = error.message; updateOverlayStatus(); }
   });
-  document.addEventListener('keydown', (event) => { if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return; if (event.key === 'ArrowLeft') { event.preventDefault(); loadFrame(state.index - 1); } else if (event.key === 'ArrowRight') { event.preventDefault(); loadFrame(state.index + 1); } else if (event.key.toLowerCase() === 'n' && state.mode === 'ball') { event.preventDefault(); $('absent-button').click(); } });
+  document.addEventListener('keydown', (event) => { if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return; if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); $('undo-button').click(); } else if (event.key === 'ArrowLeft') { event.preventDefault(); loadFrame(state.index - 1); } else if (event.key === 'ArrowRight') { event.preventDefault(); loadFrame(state.index + 1); } else if (event.key.toLowerCase() === 'n' && state.mode === 'ball') { event.preventDefault(); $('absent-button').click(); } });
   (async () => {
     try {
-      const session = await (await fetch('/api/session')).json(); state.frameIds = session.frame_ids; $('video-name').textContent = session.video; $('total-frames').textContent = state.frameIds.length; $('scrubber').max = Math.max(0, state.frameIds.length - 1); $('labels-path').textContent = session.labels_path; $('corners-path').textContent = session.corners_path; updateCoverage(session.counts); await loadFrame(0);
+      const session = await (await fetch('/api/session')).json(); state.frameIds = session.frame_ids; state.tracker = session.tracker; $('video-name').textContent = session.video; $('total-frames').textContent = state.frameIds.length; $('scrubber').max = Math.max(0, state.frameIds.length - 1); $('labels-path').textContent = session.labels_path; $('corners-path').textContent = session.corners_path; updateCoverage(session.counts); await loadFrame(0);
     } catch (error) { setAction(error.message); }
   })();
 })();
