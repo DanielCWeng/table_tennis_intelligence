@@ -1,12 +1,38 @@
 import json
 from pathlib import Path
 
+from ttintel.media import FramePacket
 from ttintel.pipeline import analyse_video
-from ttintel.schemas import Estimate, Point2D, from_dict, to_dict
+from ttintel.schemas import (
+    BallState,
+    Estimate,
+    InferenceType,
+    Point2D,
+    Visibility,
+    from_dict,
+    to_dict,
+)
 from ttintel.storage import SessionStore
 
 
 REAL_VIDEO = Path("third_party/tt3d/data/calibration_test/videos/test_00.mp4")
+
+
+class FixtureBallTracker:
+    """Keep storage tests independent of the optional TOTNet checkpoint."""
+
+    info = type("Info", (), {"name": "test.fixture_ball_tracker"})()
+
+    def estimate(self, packet: FramePacket) -> BallState:
+        return BallState(
+            image=Estimate(
+                value=Point2D(20.0, 20.0),
+                confidence=0.8,
+                source=self.info.name,
+                visibility=Visibility.VISIBLE,
+                inference_type=InferenceType.MODEL_INFERRED,
+            )
+        )
 
 
 def test_attempted_absence_survives_serialisation() -> None:
@@ -33,6 +59,7 @@ def test_real_session_round_trips_as_typed_objects(tmp_path) -> None:
         REAL_VIDEO,
         output_root=tmp_path / "sessions",
         max_frames=12,
+        ball_tracker_instance=FixtureBallTracker(),
         render=False,
     )
     assert result.session_path is not None
@@ -50,6 +77,7 @@ def test_manifest_avoids_frame_and_event_duplication_and_writes_layers(tmp_path)
         REAL_VIDEO,
         output_root=tmp_path / "sessions",
         max_frames=4,
+        ball_tracker_instance=FixtureBallTracker(),
         render=False,
     )
     assert result.session_path is not None

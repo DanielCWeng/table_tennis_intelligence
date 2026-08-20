@@ -1,11 +1,64 @@
 import json
 
 import numpy as np
+import pytest
 
 from ttintel.calibration import calibrate_manual
-from ttintel.pipeline import analyse_packets
+from ttintel.adapters.totnet import TotnetUnavailable
+from ttintel.cli import build_parser
+from ttintel.pipeline import _select_ball_tracker, analyse_packets
 from ttintel.media import FramePacket
-from ttintel.schemas import Point2D
+from ttintel.schemas import BallState, Estimate, InferenceType, Point2D, Visibility
+
+
+class FakeBallTracker:
+    info = type("Info", (), {"name": "test.ball_tracker"})()
+
+    def estimate(self, packet: FramePacket) -> BallState:
+        return BallState(
+            image=Estimate(
+                value=Point2D(12.0, 13.0),
+                confidence=0.8,
+                source=self.info.name,
+                visibility=Visibility.VISIBLE,
+                inference_type=InferenceType.MODEL_INFERRED,
+            )
+        )
+
+
+def test_cli_defaults_to_totnet() -> None:
+    args = build_parser().parse_args(["video.mp4"])
+    assert args.ball_tracker == "totnet"
+
+
+def test_tracker_selection_is_explicit_and_does_not_fallback(monkeypatch) -> None:
+    fake = FakeBallTracker()
+    monkeypatch.setattr("ttintel.pipeline.TOTNetBallTracker", lambda: fake)
+    assert _select_ball_tracker("totnet") is fake
+    assert _select_ball_tracker("blob").info.name == "ball.bright_blob_baseline"
+    assert _select_ball_tracker("none") is None
+
+    def unavailable():
+        raise TotnetUnavailable("TOTNet checkpoint not found: C:/missing/model.pth")
+
+    monkeypatch.setattr("ttintel.pipeline.TOTNetBallTracker", unavailable)
+    with pytest.raises(TotnetUnavailable, match="--ball-tracker blob"):
+        _select_ball_tracker("totnet")
+
+
+def test_packet_pipeline_records_injected_ball_tracker(tmp_path) -> None:
+    packets = [
+        FramePacket(index, index / 25.0, np.zeros((120, 220, 3), dtype=np.uint8))
+        for index in range(2)
+    ]
+    result = analyse_packets(
+        packets,
+        output_root=tmp_path / "sessions",
+        ball_tracker=FakeBallTracker(),
+        render=False,
+    )
+    assert result.session.metadata["ball_tracker"] == "test.ball_tracker"
+    assert result.session.frames[0].ball is not None
 
 
 def test_pipeline_writes_structured_session_and_render(tmp_path) -> None:
