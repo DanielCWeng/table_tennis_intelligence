@@ -94,7 +94,6 @@ class TrackingConfig:
     smoothness_weight: float = 0.75
     speed_weight: float = 0.35
     table_weight: float = 0.45
-    evidence_weight: float = 3.0
     # A segment change is cheaper than forcing a false quadratic through a
     # paddle contact.  The observation and table terms still have to support
     # the new candidate; this is not a free teleport.
@@ -282,57 +281,28 @@ def _evidence_floor(frames: Sequence[CandidateFrame]) -> float:
     )
 
 
-def _emission(
-    candidate: BallCandidate,
-    frame: CandidateFrame,
-    *,
-    evidence_floor: float,
-    config: TrackingConfig,
-) -> float:
+def _emission(candidate: BallCandidate, frame: CandidateFrame, config: TrackingConfig) -> float:
+    """Score one candidate's support within its own frame.
+
+    This term is deliberately rank-relative.  An absolute-confidence floor was
+    tried here and removed: TOTNet's softmax has no null class, so its scale
+    means different things on different clips, and gating candidate *selection*
+    on the clip's lower confidence tail discarded genuine motion-blurred
+    detections on Frankfurt while buying two frames on London.  Deciding that a
+    frame carries no ball is left to the interpolation gate, which acts only on
+    bridge anchors and was measured not to cost anything on either clip.
+    """
+
     if not frame.candidates:
         return -config.missing_frame_cost
     frame_max = max(item.confidence for item in frame.candidates)
     relative = (candidate.confidence + 1e-5) / (frame_max + 1e-5)
     # Rank-relative evidence keeps a low-confidence but locally strongest
-    # candidate usable while still preferring a genuinely strong peak.  The
-    # measured absolute term is a bounded frame-level floor penalty.  It
-    # is steep around the top-1 floor because a whole heatmap at that level is
-    # not evidence, then quickly disappears for a supported frame.  A smaller
-    # one-sided candidate penalty handles a weak alternative such as London's
-    # rank-7 pick without making confidence alone overwhelm motion.
-    candidate_floor_log_ratio = log(
-        max(candidate.confidence, float(np.finfo(float).tiny)) / evidence_floor
-    )
-    frame_floor_log_ratio = log(
-        max(frame_max, float(np.finfo(float).tiny)) / evidence_floor
-    )
-    frame_floor_penalty = (
-        -config.evidence_weight / (1.0 + np.exp(16.0 * frame_floor_log_ratio))
-        if frame_floor_log_ratio >= 0.0
-        else 0.0
-    )
-    candidate_floor_penalty = 0.05 * min(0.0, candidate_floor_log_ratio)
-    if (
-        abs(frame_floor_log_ratio) < 0.10
-        and candidate_floor_log_ratio < 0.0
-    ):
-        # When the entire frame is at the measured floor, a lower-ranked peak
-        # cannot rescue it; otherwise the rank-relative term would recreate a
-        # ball on London's floor run.
-        return -config.missing_frame_cost - config.evidence_weight
-    # A candidate several orders below the clip's measured floor is not a
-    # useful lower-ranked alternative.  This is a relative floor test, not a
-    # venue-specific confidence cutoff; it removes London's 6e-5 rank-7 pick
-    # while leaving ordinary moving alternatives to the rank and motion terms.
-    candidate_floor_penalty -= config.evidence_weight / (
-        1.0 + np.exp(32.0 * (candidate_floor_log_ratio - log(0.05)))
-    )
+    # candidate usable while still preferring a genuinely strong peak.
     return (
         0.60
         + 0.20 * float(np.log(relative))
         + 0.08 * log1p(50.0 * candidate.confidence)
-        + float(frame_floor_penalty)
-        + candidate_floor_penalty
         - config.table_weight * candidate.table_penalty
     )
 
@@ -407,7 +377,7 @@ def _best_path(
     for current_state in range(state_counts[0]):
         current = _state_candidate(first, current_state) if current_state != missing(first) else None
         scores[(-1, current_state if current is not None else -1)] = (
-            _emission(current, first, evidence_floor=evidence_floor, config=config)
+            _emission(current, first, config)
             if current is not None
             else -config.missing_frame_cost
         )
@@ -428,7 +398,7 @@ def _best_path(
         for (_, previous_state), previous_score in scores.items():
             previous = _state_candidate(first, previous_state) if previous_state >= 0 else None
             value = previous_score + (
-                _emission(current, second, evidence_floor=evidence_floor, config=config)
+                _emission(current, second, config)
                 if current is not None
                 else -config.missing_frame_cost
             )
@@ -463,7 +433,7 @@ def _best_path(
                 previous_previous = _state_candidate(frames[index - 2], previous_previous_id) if previous_previous_id >= 0 else None
                 previous = _state_candidate(previous_frame, previous_id) if previous_id >= 0 else None
                 value = previous_score + (
-                    _emission(current, frame, evidence_floor=evidence_floor, config=config)
+                    _emission(current, frame, config)
                     if current is not None
                     else -config.missing_frame_cost
                 )
