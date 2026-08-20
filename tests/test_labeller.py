@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 import pytest
@@ -6,6 +7,7 @@ import pytest
 pytest.importorskip("flask")
 
 from ttintel.calibration import load_manual_corners
+from ttintel import labeller as labeller_module
 from ttintel.labeller import (
     BallLabel,
     FrameStore,
@@ -86,3 +88,33 @@ def test_server_handlers_persist_labels_and_write_loadable_corners(tmp_path: Pat
     reloaded_session = reloaded.test_client().get("/api/session").get_json()
     assert reloaded_session["counts"] == {"labelled": 2, "point": 1, "absent": 1, "untouched": 0}
     assert reloaded_session["manual_corners"][0] == {"x": 3.0, "y": 15.0}
+
+
+def test_default_storage_is_repo_label_dir_keyed_by_video_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"stable fixture bytes")
+    monkeypatch.setattr(labeller_module, "_repository_labels_dir", lambda: tmp_path / "data" / "labels")
+    store = FrameStore(video, packets=[FramePacket(4, 0.0, np.full((18, 32, 3), 30, dtype=np.uint8))])
+    app = create_app(video, frame_store=store)
+    client = app.test_client()
+
+    session = client.get("/api/session").get_json()
+    video_id = labeller_module._video_id(video)
+    assert session["video"] == "clip.mp4"
+    assert session["video_id"] == video_id
+    assert Path(session["labels_path"]) == tmp_path / "data" / "labels" / f"{video_id}.labels.json"
+    assert Path(session["corners_path"]) == tmp_path / "data" / "labels" / f"{video_id}.corners.json"
+
+    assert client.post("/api/labels", json={"frame_id": 4, "label": "absent"}).status_code == 200
+    payload = load_labels(tmp_path / "data" / "labels" / f"{video_id}.labels.json").to_dict()
+    assert payload["video_id"] == video_id
+    assert payload["source_filename"] == "clip.mp4"
+    assert str(video) not in (tmp_path / "data" / "labels" / f"{video_id}.labels.json").read_text()
+
+    corners = [{"x": 3, "y": 15}, {"x": 29, "y": 15}, {"x": 25, "y": 4}, {"x": 7, "y": 4}]
+    assert client.post("/api/corners", json={"corners": corners}).status_code == 200
+    corner_path = tmp_path / "data" / "labels" / f"{video_id}.corners.json"
+    assert load_manual_corners(corner_path)[0] == Point2D(3, 15)
+    corner_payload = json.loads(corner_path.read_text())
+    assert corner_payload["video_id"] == video_id
+    assert corner_payload["source_filename"] == "clip.mp4"

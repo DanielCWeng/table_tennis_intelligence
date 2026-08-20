@@ -1,10 +1,10 @@
 """Local browser labeller for calibration corners and sparse ball ground truth.
 
 The labeller is deliberately a thin application boundary.  It indexes the
-video's existing ``FramePacket`` stream, stores human labels beside the clip,
-and calls the same calibration and tracking seams used by the pipeline.  The
-web framework is imported only when the application is created so importing
-``ttintel`` remains useful in the minimal core environment.
+video's existing ``FramePacket`` stream, stores human labels in the repository
+ground-truth directory, and calls the same calibration and tracking seams used
+by the pipeline.  The web framework is imported only when the application is
+created so importing ``ttintel`` remains useful in the minimal core environment.
 """
 
 from __future__ import annotations
@@ -22,18 +22,36 @@ import numpy as np
 
 from .calibration import (
     calibrate_manual,
+    calibration_quality,
     detect_table_corners_heuristic,
     load_manual_corners,
     parse_manual_corners,
     save_manual_corners,
 )
-from .media import FramePacket, iter_video_frames
+from .media import FramePacket, _video_id, iter_video_frames
 from .schemas import InferenceType, Point2D
 
 
-LABEL_FORMAT_VERSION = 1
+LABEL_FORMAT_VERSION = 2
 DEFAULT_LABEL_SUFFIX = ".labels.json"
 DEFAULT_CORNER_SUFFIX = ".corners.json"
+
+
+def _repository_labels_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "data" / "labels"
+
+
+def _stable_video_id(video: Path) -> str:
+    try:
+        return _video_id(video)
+    except OSError:
+        # FrameStore can be constructed from synthetic packets in tests before
+        # a real media file exists. Real videos always use media._video_id.
+        return f"{video.stem}-unmaterialized"
+
+
+def _default_storage_path(video_id: str, suffix: str) -> Path:
+    return _repository_labels_dir() / f"{video_id}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -77,18 +95,24 @@ class LabelSet:
     video: str
     labels: dict[int, BallLabel] = field(default_factory=dict)
     version: int = LABEL_FORMAT_VERSION
+    video_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        source_filename = Path(self.video).name
         return {
-            "version": self.version,
-            "video": self.video,
+            "version": LABEL_FORMAT_VERSION,
+            "video_id": self.video_id,
+            "source_filename": source_filename,
+            # Keep the old human-readable field, but never write a machine-
+            # specific absolute path into committed ground truth.
+            "video": source_filename,
             "frames": {str(frame_id): label.to_dict() for frame_id, label in sorted(self.labels.items())},
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "LabelSet":
         version = int(payload.get("version", 0))
-        if version != LABEL_FORMAT_VERSION:
+        if version not in {1, LABEL_FORMAT_VERSION}:
             raise ValueError(f"unsupported label format version: {version}")
         raw_frames = payload.get("frames", {})
         if not isinstance(raw_frames, Mapping):
@@ -102,7 +126,13 @@ class LabelSet:
             if not isinstance(raw_label, Mapping):
                 raise ValueError(f"label for frame {frame_id} must be an object")
             labels[frame_id] = BallLabel.from_dict(raw_label)
-        return cls(video=str(payload.get("video", "")), labels=labels, version=version)
+        source = payload.get("source_filename", payload.get("video", ""))
+        return cls(
+            video=Path(str(source)).name,
+            labels=labels,
+            version=LABEL_FORMAT_VERSION,
+            video_id=str(payload.get("video_id", "")),
+        )
 
 
 def load_labels(path: str | Path) -> LabelSet:
@@ -226,15 +256,19 @@ class LabellerState:
         corners_path: str | Path | None = None,
     ) -> None:
         self.store = store
-        self.labels_path = Path(labels_path or (store.video.parent / (store.video.name + DEFAULT_LABEL_SUFFIX)))
-        self.corners_path = Path(corners_path or (store.video.parent / (store.video.name + DEFAULT_CORNER_SUFFIX)))
+        self.video_id = _stable_video_id(store.video)
+        self.labels_path = Path(labels_path) if labels_path is not None else _default_storage_path(self.video_id, DEFAULT_LABEL_SUFFIX)
+        self.corners_path = Path(corners_path) if corners_path is not None else _default_storage_path(self.video_id, DEFAULT_CORNER_SUFFIX)
         if self.labels_path.is_file():
             loaded = load_labels(self.labels_path)
-            self.labels = {
-                frame_id: label
-                for frame_id, label in loaded.labels.items()
-                if frame_id in set(store.frame_ids)
-            }
+            if loaded.video_id and loaded.video_id != self.video_id:
+                self.labels = {}
+            else:
+                self.labels = {
+                    frame_id: label
+                    for frame_id, label in loaded.labels.items()
+                    if frame_id in set(store.frame_ids)
+                }
         else:
             self.labels = {}
         self._tracker: dict[int, Any] = {}
@@ -256,7 +290,8 @@ class LabellerState:
             point_count = sum(label.kind == "point" for label in self.labels.values())
             absent_count = sum(label.kind == "absent" for label in self.labels.values())
             return {
-                "video": str(self.store.video),
+                "video": self.store.video.name,
+                "video_id": self.video_id,
                 "frame_ids": list(self.store.frame_ids),
                 "width": self.store.width,
                 "height": self.store.height,
@@ -287,7 +322,10 @@ class LabellerState:
                 if not (0.0 <= label.point.x <= record.width and 0.0 <= label.point.y <= record.height):
                     raise ValueError("point must be inside the frame")
             self.labels[record.frame_id] = label
-            save_labels(self.labels_path, LabelSet(str(self.store.video), dict(self.labels)))
+            save_labels(
+                self.labels_path,
+                LabelSet(self.store.video.name, dict(self.labels), video_id=self.video_id),
+            )
 
     def save_corners(self, corners: Sequence[Point2D]) -> None:
         # This call is intentionally the producer for the CLI's existing
@@ -295,14 +333,29 @@ class LabellerState:
         # make the two entry points drift.
         ordered = parse_manual_corners(corners)
         save_manual_corners(self.corners_path, ordered)
+        # The calibration parser ignores these descriptive fields, so the
+        # committed corner file can identify its source without changing the
+        # four named points consumed by calibration.
+        payload = json.loads(self.corners_path.read_text(encoding="utf-8"))
+        payload["video_id"] = self.video_id
+        payload["source_filename"] = self.store.video.name
+        self.corners_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     def frame_payload(self, frame_id: int, *, include_calibration: bool = False) -> dict[str, Any]:
         record = self.store.get(frame_id)
         label = self.labels.get(record.frame_id)
         auto = None
+        auto_sensitivity = None
         if include_calibration:
             detected = detect_table_corners_heuristic(self.store.image(record.frame_id))
             auto = _corners_dict(detected)
+            if detected is not None:
+                try:
+                    auto_sensitivity = float(
+                        calibration_quality(calibrate_manual(detected))["corner_sensitivity_m_per_px"]
+                    )
+                except (ValueError, TypeError, np.linalg.LinAlgError):
+                    auto_sensitivity = None
         tracker = self._tracker.get(record.frame_id)
         return {
             "frame_id": record.frame_id,
@@ -311,6 +364,7 @@ class LabellerState:
             "height": record.height,
             "label": label.to_dict() if label else None,
             "auto_corners": auto,
+            "auto_corner_sensitivity_m_per_px": auto_sensitivity,
             "manual_corners": _corners_dict(self.manual_corners),
             "tracker": _estimate_payload(tracker.image) if tracker is not None else None,
         }
@@ -436,8 +490,8 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = argparse.ArgumentParser(prog="python -m ttintel.labeller", description="Label table corners and ball positions in a local browser.")
     parser.add_argument("video", type=Path)
-    parser.add_argument("--labels", type=Path, help="label sidecar (default: <video>.labels.json)")
-    parser.add_argument("--corners", type=Path, help="manual corners file (default: <video>.corners.json)")
+    parser.add_argument("--labels", type=Path, help="label sidecar (default: data/labels/<video_id>.labels.json)")
+    parser.add_argument("--corners", type=Path, help="manual corners file (default: data/labels/<video_id>.corners.json)")
     parser.add_argument("--host", default="127.0.0.1", help="bind address; localhost is the safe default")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-open-browser", action="store_true")
