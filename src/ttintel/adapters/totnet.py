@@ -14,10 +14,11 @@ adding a dependency or a custom CUDA operation.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Sequence
 import sys
 
 import numpy as np
@@ -133,10 +134,29 @@ def _pad_temporal_window(frames: Sequence[Any], length: int = NUM_FRAMES) -> lis
     return [frames[0]] * (length - len(frames)) + list(frames)
 
 
+class HeatmapPeak(NamedTuple):
+    """One spatial heatmap maximum in model-input coordinates."""
+
+    x: int
+    y: int
+    confidence: float
+
+
 def _decode_heatmap(
-    heatmap: Any, *, input_height: int = INPUT_HEIGHT, input_width: int = INPUT_WIDTH
-) -> tuple[int, int, float]:
-    """Return argmax x/y and the model heatmap probability at that location."""
+    heatmap: Any,
+    *,
+    input_height: int = INPUT_HEIGHT,
+    input_width: int = INPUT_WIDTH,
+    top_k: int | None = None,
+    nms_radius: int = 7,
+) -> HeatmapPeak | list[HeatmapPeak]:
+    """Decode the heatmap, optionally returning spatially distinct top-k peaks.
+
+    The no-argument form intentionally retains the old argmax return shape so
+    existing adapter callers remain compatible.  Supplying ``top_k`` uses
+    greedy non-maximum suppression in heatmap pixels; therefore neighbouring
+    pixels from one broad response cannot consume the whole candidate list.
+    """
 
     if hasattr(heatmap, "detach"):
         array = heatmap.detach().cpu().numpy()
@@ -154,8 +174,64 @@ def _decode_heatmap(
         flat = array
     else:
         raise ValueError(f"expected flattened or 2-D heatmap, got {array.shape}")
-    index = int(np.argmax(flat))
-    return index % input_width, index // input_width, float(flat[index])
+    if flat.size != input_height * input_width:
+        raise ValueError(
+            f"heatmap has {flat.size} values, expected {input_height * input_width}"
+        )
+    if top_k is None:
+        index = int(np.argmax(flat))
+        return HeatmapPeak(index % input_width, index // input_width, float(flat[index]))
+    if int(top_k) < 1:
+        raise ValueError("top_k must be at least 1")
+    if int(nms_radius) < 0:
+        raise ValueError("nms_radius must be non-negative")
+
+    response = np.asarray(flat, dtype=np.float32).copy()
+    peaks: list[HeatmapPeak] = []
+    radius = int(nms_radius)
+    for _ in range(int(top_k)):
+        index = int(np.argmax(response))
+        confidence = float(response[index])
+        if not np.isfinite(confidence) or confidence <= 0.0:
+            break
+        x, y = index % input_width, index // input_width
+        peaks.append(HeatmapPeak(x, y, confidence))
+        y0, y1 = max(0, y - radius), min(input_height, y + radius + 1)
+        x0, x1 = max(0, x - radius), min(input_width, x + radius + 1)
+        response.reshape(input_height, input_width)[y0:y1, x0:x1] = -np.inf
+    return peaks
+
+
+def _decode_heatmap_candidates(
+    heatmap: Any,
+    *,
+    top_k: int = 8,
+    nms_radius: int = 7,
+    input_height: int = INPUT_HEIGHT,
+    input_width: int = INPUT_WIDTH,
+) -> list[HeatmapPeak]:
+    """Named candidate-decoding entry point for offline tracking callers."""
+
+    peaks = _decode_heatmap(
+        heatmap,
+        input_height=input_height,
+        input_width=input_width,
+        top_k=top_k,
+        nms_radius=nms_radius,
+    )
+    assert isinstance(peaks, list)
+    return peaks
+
+
+@dataclass(frozen=True)
+class TotnetCandidate:
+    """A TOTNet peak mapped to the packet image, before temporal linking."""
+
+    x: float
+    y: float
+    confidence: float
+    heatmap_x: int
+    heatmap_y: int
 
 
 class TOTNetBallTracker:
@@ -296,7 +372,9 @@ class TOTNetBallTracker:
             )
         return BallState(image=estimate)
 
-    def estimate(self, packet: FramePacket) -> BallState:
+    def _predict_current_heatmap(self, packet: FramePacket) -> Any:
+        """Run the causal model once and return the current-frame heatmap."""
+
         if self._last_frame_id is not None and packet.frame_id != self._last_frame_id + 1:
             self.reset()
         current = self._preprocess(packet.image, self._torch)
@@ -306,13 +384,50 @@ class TOTNetBallTracker:
         batch = self._torch.stack(window, dim=0).unsqueeze(0).to(self.device)
         with self._torch.inference_mode():
             output = self._model(batch)
-            heatmap = self._model_heatmap(output, self._torch)
-            confidence, index = self._torch.max(heatmap[0], dim=0)
-        index_value = int(index.item())
+            return self._model_heatmap(output, self._torch)[0]
+
+    def estimate_candidates(
+        self,
+        packet: FramePacket,
+        *,
+        top_k: int = 8,
+        nms_radius: int = 7,
+    ) -> list[TotnetCandidate]:
+        """Return top-k NMS-separated candidates for the packet's frame.
+
+        Candidate collection deliberately does not apply ``confidence_threshold``:
+        that threshold is a legacy single-detection policy, while the offline
+        linker needs the lower-ranked alternatives in order to recover from an
+        occlusion or a distractor.
+        """
+
+        heatmap = self._predict_current_heatmap(packet)
+        peaks = _decode_heatmap_candidates(heatmap, top_k=top_k, nms_radius=nms_radius)
+        height, width = np.asarray(packet.image).shape[:2]
+        return [
+            TotnetCandidate(
+                x=float(peak.x) * float(width) / INPUT_WIDTH,
+                y=float(peak.y) * float(height) / INPUT_HEIGHT,
+                confidence=peak.confidence,
+                heatmap_x=peak.x,
+                heatmap_y=peak.y,
+            )
+            for peak in peaks
+        ]
+
+    # This spelling reads naturally in callers that want to distinguish the
+    # multi-candidate path from ``estimate``'s schema-valued single result.
+    estimate_top_k = estimate_candidates
+
+    def estimate(self, packet: FramePacket) -> BallState:
+        candidates = self.estimate_candidates(packet, top_k=1, nms_radius=0)
+        if not candidates:
+            return self._state_from_prediction(0, 0, 0.0, packet.image)
+        candidate = candidates[0]
         return self._state_from_prediction(
-            index_value % INPUT_WIDTH,
-            index_value // INPUT_WIDTH,
-            float(confidence.item()),
+            candidate.heatmap_x,
+            candidate.heatmap_y,
+            candidate.confidence,
             packet.image,
         )
 
@@ -324,7 +439,10 @@ TotnetBallTracker = TOTNetBallTracker
 
 __all__ = [
     "DEFAULT_CHECKPOINT",
+    "HeatmapPeak",
     "TOTNetBallTracker",
+    "TotnetCandidate",
     "TotnetBallTracker",
     "TotnetUnavailable",
+    "_decode_heatmap_candidates",
 ]
