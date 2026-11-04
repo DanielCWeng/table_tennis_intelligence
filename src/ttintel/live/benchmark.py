@@ -24,6 +24,8 @@ def benchmark(frames: int = 180, width: int = 384) -> dict:
     tracker.set_regions(ROI(78, 208, 240, 135), ROI(430, 90, 100, 120))
     timings: list[float] = []
     valid = 0
+    moving = 0
+    max_lateral_step = 0.0
     states: dict[str, int] = {}
     started = time.perf_counter()
     for i in range(frames):
@@ -39,11 +41,14 @@ def benchmark(frames: int = 180, width: int = 384) -> dict:
         "source": "synthetic constructed frames; analysis only",
         "frames": frames,
         "width_px": width,
-        "analysis_frames_per_second": round(frames / elapsed, 2),
+        "analysis_frames_per_second": round(frames / (sum(timings) / 1000), 2),
+        "full_synthetic_loop_fps": round(frames / elapsed, 2),
         "wall_seconds": round(elapsed, 3),
         "median_analysis_ms": round(statistics.median(timings), 3),
         "p95_analysis_ms": round(sorted(timings)[int((len(timings) - 1) * .95)], 3),
         "valid_position_frames": valid,
+        "frames_with_lateral_motion_over_0_3px": moving,
+        "max_abs_lateral_step_px": round(max_lateral_step, 3),
         "reasons": states,
         "capture_fps": None,
         "display_latency_ms": None,
