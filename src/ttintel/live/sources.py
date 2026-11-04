@@ -77,21 +77,32 @@ def demo_frames(stop: Event, fps: int = 30) -> Iterator[FramePacket]:
         stop.wait(max(0.0, started + frame_id * interval - time.monotonic()))
 
 
-def file_frames(path: Path, stop: Event, fps_cap: int = 30) -> Iterator[FramePacket]:
+def file_frames(path: Path, stop: Event, pause: Event | None = None
+                ) -> Iterator[FramePacket]:
+    """Paced media playback; pausing moves wall-clock origin, not file PTS."""
     started = time.monotonic()
     first_timestamp: float | None = None
     for packet in iter_video_frames(path):
         if stop.is_set():
-            break
+            return
         if first_timestamp is None:
             first_timestamp = packet.timestamp
-        # Real-time playback; original media timestamps remain unmodified.
         elapsed = max(0., packet.timestamp - first_timestamp)
-        wait_s = started + elapsed - time.monotonic()
-        if wait_s > 0 and stop.wait(wait_s):
-            break
+        while not stop.is_set():
+            if pause is not None and pause.is_set():
+                paused_at = time.monotonic()
+                while pause.is_set() and not stop.wait(.025):
+                    pass
+                started += time.monotonic() - paused_at
+                continue
+            remaining = started + elapsed - time.monotonic()
+            if remaining <= 0:
+                break
+            if stop.wait(min(.025, remaining)):
+                return
+        if stop.is_set():
+            return
         yield packet
-
 
 def offer_latest(queue: Queue, value: object) -> int:
     """Drop a stale item rather than let analysis/render latency accumulate."""
@@ -202,12 +213,15 @@ class LiveEngine:
             elif self.source == "demo":
                 source = demo_frames(self.stop_event, self.fps)
             else:
-                source = file_frames(self.file, self.stop_event, self.fps)
+                source = file_frames(self.file, self.stop_event, self.pause_event)
             for packet in source:
                 if self.stop_event.is_set():
                     break
-                while self.pause_event.is_set() and not self.stop_event.wait(.025):
-                    pass
+                # File mode handles pause inside its paced generator to avoid
+                # accelerated catch-up of old frames after resume.
+                if self.source != "file":
+                    while self.pause_event.is_set() and not self.stop_event.wait(.025):
+                        pass
                 if self.stop_event.is_set():
                     break
                 now = time.monotonic()
