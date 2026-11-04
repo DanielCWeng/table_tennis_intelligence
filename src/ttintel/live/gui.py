@@ -207,6 +207,7 @@ class LiveWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.engine = engine
         self.samples: deque[tuple] = deque(maxlen=1800)
+        self.ui_update_times: deque[float] = deque(maxlen=90)
         self.first_timestamp: float | None = None
         self.setWindowTitle("TABLE TENNIS INTELLIGENCE  /  LIVE LAB")
         self.resize(1260, 800)
@@ -321,6 +322,7 @@ class LiveWindow(QtWidgets.QMainWindow):
     def _reset(self) -> None:
         self.engine.reset()
         self.samples.clear()
+        self.ui_update_times.clear()
         self.first_timestamp = None
         self.curve.setData([], [])
         self.intensity_curve.setData([], [])
@@ -372,11 +374,13 @@ class LiveWindow(QtWidgets.QMainWindow):
         if sample.candidate:
             self.event.setText(f"Latest candidate @ {t:.2f}s  /  {sample.candidate}")
         now = time.monotonic()
+        self.ui_update_times.append(now)
         self.telemetry.setText(
             f"Capture {self.engine.rate(self.engine.capture_times):.1f} FPS"
             f"  |  Analysis {self.engine.rate(self.engine.processing_times):.1f} FPS"
+            f"  |  UI updates {self.engine.rate(self.ui_update_times):.1f} FPS"
             f"\nAnalysis {result.analysis_ms:.1f} ms"
-            f"  |  Display age {(now - result.grabbed_at) * 1000:.0f} ms"
+            f"  |  Capture-to-UI {(now - result.grabbed_at) * 1000:.0f} ms"
             f"\nDropped capture {self.engine.dropped_capture}"
             f"  |  Dropped display {self.engine.dropped_display}"
         )
