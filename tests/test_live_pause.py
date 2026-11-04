@@ -69,3 +69,23 @@ def test_paused_gui_never_renders_in_flight_results(monkeypatch) -> None:
     finally:
         window.close()
         app.processEvents()
+
+
+def test_unknown_tracking_loss_clears_relative_displacement_anchor() -> None:
+    """An unobserved interval must not be bridged into the next trajectory."""
+    import numpy as np
+    from ttintel.live.core import LiveMotionTracker
+    from ttintel.media import FramePacket
+
+    tracker = LiveMotionTracker()
+    tracker._position[:] = [14.0, -3.0]
+    tracker._direction = 1
+    tracker._leg = 6.0
+    sample = tracker._unknown(
+        FramePacket(6, 0.2, np.zeros((100, 140, 3), np.uint8)),
+        "reference_loss",
+    )
+    assert sample.position.value is None
+    assert np.allclose(tracker._position, [0.0, 0.0])
+    assert tracker._direction == 0
+    assert tracker._leg == 0.0
