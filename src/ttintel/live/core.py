@@ -121,6 +121,14 @@ class LiveMotionTracker:
             self.reset()
 
     def _unknown(self, packet: FramePacket, reason: str) -> MotionSample:
+        # An unobserved frame breaks relative trajectory continuity.
+        # Re-anchor on valid tracking rather than silently bridge a lost
+        # player/camera reference through unknown motion.
+        self._position[:] = 0.0
+        self._direction = 0
+        self._leg = 0.0
+        self._last_turn = None
+        self._quiet_since = None
         flags = ["heuristic", reason]
         return MotionSample(
             packet.frame_id, packet.timestamp,
