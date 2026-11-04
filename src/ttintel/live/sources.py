@@ -71,10 +71,11 @@ def demo_frames(stop: Event, fps: int = 30) -> Iterator[FramePacket]:
     frame_id = 0
     interval = 1 / fps
     while not stop.is_set():
-        t = time.monotonic()
-        yield FramePacket(frame_id, t, synthetic_frame(t - started))
+        tick = time.monotonic()
+        yield FramePacket(frame_id, tick, synthetic_frame(tick - started))
         frame_id += 1
-        stop.wait(max(0.0, started + frame_id * interval - time.monotonic()))
+        # Per-frame pacing does not burst old frames after a pause.
+        stop.wait(max(0.0, interval - (time.monotonic() - tick)))
 
 
 def file_frames(path: Path, stop: Event, pause: Event | None = None
