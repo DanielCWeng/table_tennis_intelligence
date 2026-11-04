@@ -26,20 +26,29 @@ class Result:
 
 
 def synthetic_frame(seconds: float, width: int = 640, height: int = 360) -> np.ndarray:
-    """An explicitly synthetic table with two moving rectangles (RGB)."""
+    """Textured moving subjects and static reference (clearly synthetic RGB)."""
     import cv2
     frame = np.full((height, width, 3), (20, 27, 42), np.uint8)
+    # Deterministic texture supports measurable camera-reference features.
+    for y in range(14, height, 24):
+        for x in range(12, width, 24):
+            cv2.circle(frame, (x, y), 2, (47, 58, 75), -1)
     cv2.rectangle(frame, (100, 88), (width - 100, height - 88), (47, 85, 96), -1)
+    for y in range(101, height - 88, 23):
+        for x in range(113, width - 100, 23):
+            cv2.circle(frame, (x, y), 2, (65, 106, 116), -1)
     cv2.rectangle(frame, (100, 88), (width - 100, height - 88), (140, 198, 207), 2)
     cv2.line(frame, (width // 2, 88), (width // 2, height - 88), (200, 205, 218), 2)
-    x = round(width * .30 + width * .13 * math.sin(2 * math.pi * .8 * seconds))
-    other = round(width * .70 + width * .1 * math.sin(2 * math.pi * .55 * seconds))
+    x = int(width * .30 + width * .13 * math.sin(2 * math.pi * .8 * seconds))
+    other = int(width * .70 + width * .1 * math.sin(2 * math.pi * .55 * seconds))
     for cx, cy, color in ((x, height - 62, (57, 221, 203)),
                            (other, 63, (248, 177, 116))):
         cv2.rectangle(frame, (cx - 22, cy - 30), (cx + 22, cy + 30), color, -1)
+        for xx in (-12, 0, 12):
+            for yy in (-20, -8, 7, 19):
+                cv2.circle(frame, (cx + xx, cy + yy), 3, (31, 45, 52), -1)
         cv2.line(frame, (cx - 20, cy - 12), (cx + 20, cy - 12), (30, 40, 45), 2)
     return frame
-
 
 def screen_frames(region: Region, stop: Event, fps: int = 30) -> Iterator[FramePacket]:
     import mss
