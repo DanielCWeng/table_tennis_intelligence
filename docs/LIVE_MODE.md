@@ -89,6 +89,28 @@ GUI latency. The Live Lab measures those separately during use. Neither a
 target 30 FPS nor correct athlete tracking is asserted without measured
 desktop footage.
 
+### Measured CI baseline (commit 2128e7b, 4 November 2026)
+
+The constructed 180-frame benchmark completed on the hosted runners:
+
+| Metric | Ubuntu 3.11 runner | Windows 3.11 runner |
+| --- | ---: | ---: |
+| Optical-flow analysis FPS (excludes synthetic frame creation) | 249.79 | 205.02 |
+| Full synthetic loop FPS (includes frame generation; no GUI/screen capture) | 189.30 | 164.67 |
+| Median analysis time | 3.728 ms | 4.828 ms |
+| p95 analysis time | 5.052 ms | 5.680 ms |
+| Valid image-space position frames | 179/180 | 179/180 |
+| Frames with lateral step above 0.3 processed pixels | 169/180 | 169/180 |
+| Largest measured absolute lateral step | 8.431 px | 8.431 px |
+
+[CI benchmark and log evidence](https://github.com/DanielCWeng/table_tennis_intelligence/actions/runs/41936172775).
+The fixture is deliberately constructed and easy to track. **These numbers
+are not real-match FPS, player-detection accuracy, CPU/GPU usage, memory
+requirements, desktop capture FPS or end-to-end display latency**. Those
+remain unmeasured until an actual Windows/browser test and representative
+table-tennis footage are available. There are no current GPU requirements
+for the lightweight optical-flow lane.
+
 For a Windows desktop acceptance test: open a permitted browser match; select
 a monitor with the drag overlay; run 2 minutes with one textured player ROI;
 move and resize it; pause/resume; introduce a camera cut; confirm UNKNOWN
