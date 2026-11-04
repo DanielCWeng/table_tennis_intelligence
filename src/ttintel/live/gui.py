@@ -84,8 +84,12 @@ class VideoView(QtWidgets.QGraphicsView):
     regions_changed = QtCore.Signal()
 
     def __init__(self) -> None:
-        scene = QtWidgets.QGraphicsScene()
-        super().__init__(scene)
+        super().__init__()
+        # Parent the scene to the view; otherwise the Python wrapper can be
+        # garbage collected while the C++ view still references the scene.
+        scene = QtWidgets.QGraphicsScene(self)
+        self.setScene(scene)
+        self._scene = scene
         self.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         self.setBackgroundBrush(QtGui.QColor("#0b1421"))
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
