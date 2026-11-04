@@ -137,3 +137,12 @@ def test_offscreen_qt_preview_and_editable_roi(monkeypatch: pytest.MonkeyPatch) 
     finally:
         window.close()
         app.processEvents()
+
+
+def test_benchmark_contains_actual_synthetic_lateral_motion() -> None:
+    pytest.importorskip("cv2")
+    from ttintel.live.benchmark import benchmark
+    measured = benchmark(frames=90)
+    assert measured["valid_position_frames"] >= 70
+    assert measured["frames_with_lateral_motion_over_0_3px"] >= 10
+    assert measured["max_abs_lateral_step_px"] > 0.5
