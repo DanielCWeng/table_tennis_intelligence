@@ -16,7 +16,8 @@ from .pipeline import analyse_video
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="analyse",
-        description="Convert a table-tennis video into confidence-aware session data.",
+        description="Offline table-tennis analysis (or use 'ttintel live' for live motion diagnostics).",
+        epilog="Live browser/screen capture: ttintel live --help",
     )
     parser.add_argument("video", type=Path, help="input video")
     parser.add_argument("--output", type=Path, default=Path("outputs/sessions"), help="session output root")
