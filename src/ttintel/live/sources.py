@@ -156,6 +156,8 @@ class LiveEngine:
 
     def start(self) -> None:
         if self.threads:
+            self._drain(self.raw)
+            self._drain(self.results)
             self.pause_event.clear()
             return
         self.stop_event.clear()
@@ -170,6 +172,11 @@ class LiveEngine:
 
     def pause(self) -> None:
         self.pause_event.set()
+        # No queued frame may appear on screen after the user hits PAUSE.
+        # The analysis worker can complete one in-flight frame; the GUI
+        # ignores results until resume, when old results are discarded.
+        self._drain(self.raw)
+        self._drain(self.results)
 
     def reset(self) -> None:
         with self.lock:
@@ -220,9 +227,12 @@ class LiveEngine:
                     break
                 # File mode handles pause inside its paced generator to avoid
                 # accelerated catch-up of old frames after resume.
-                if self.source != "file":
+                if self.source != "file" and self.pause_event.is_set():
+                    # Generator produced a screenshot before PAUSE. Do not
+                    # enqueue that stale pre-pause image on resume.
                     while self.pause_event.is_set() and not self.stop_event.wait(.025):
                         pass
+                    continue
                 if self.stop_event.is_set():
                     break
                 now = time.monotonic()
