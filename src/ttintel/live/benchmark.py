@@ -34,6 +34,10 @@ def benchmark(frames: int = 180, width: int = 384) -> dict:
         sample = tracker.process(FramePacket(i, i / 30., image))
         timings.append((time.perf_counter() - now) * 1000)
         valid += sample.position.value is not None
+        delta = sample.displacement.value
+        if delta is not None:
+            moving += abs(delta.x) > 0.30
+            max_lateral_step = max(max_lateral_step, abs(delta.x))
         states[sample.reason] = states.get(sample.reason, 0) + 1
     elapsed = time.perf_counter() - started
     return {
