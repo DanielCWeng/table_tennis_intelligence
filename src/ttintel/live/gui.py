@@ -333,6 +333,10 @@ class LiveWindow(QtWidgets.QMainWindow):
         self.first_timestamp = None
 
     def _poll(self) -> None:
+        # Strict user-visible pause: even in-flight analysis must not update
+        # the video/plots after PAUSE until an explicit resume.
+        if self.engine.pause_event.is_set():
+            return
         result = self.engine.latest()
         if result is None:
             if self.engine.errors:
