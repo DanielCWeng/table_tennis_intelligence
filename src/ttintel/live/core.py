@@ -232,8 +232,21 @@ class LiveMotionTracker:
         keep = errors <= max(2.5, float(np.median(errors)) * 3)
         if np.count_nonzero(keep) < 5:
             return self._unknown(packet, "incoherent_flow")
-        corrected = np.median(residual[keep], axis=0)
-        coherence = float(np.mean(keep))
+        # A player may occupy only part of the selected ROI: background
+        # points are usually the majority. Select a coherent *moving*
+        # residual cluster, or retain a measured zero when none exists.
+        moving = np.linalg.norm(residual, axis=1) >= 0.8
+        minimum = max(5, int(len(b) * .08))
+        evidence = keep
+        corrected = np.zeros(2, np.float32)
+        if np.count_nonzero(moving) >= minimum:
+            proposal = np.median(residual[moving], axis=0)
+            aligned = np.linalg.norm(residual - proposal, axis=1)
+            candidate = moving & (aligned <= max(1.8, float(np.linalg.norm(proposal)) * .45))
+            if np.count_nonzero(candidate) >= minimum:
+                evidence = candidate
+                corrected = np.median(residual[evidence], axis=0)
+        coherence = float(np.mean(evidence))
         quality = max(0., min(1., ratio * coherence * min(1., len(b) / 24)))
         self._position += corrected
         intensity = float(np.linalg.norm(corrected) / dt)
@@ -262,7 +275,7 @@ class LiveMotionTracker:
                        InferenceType.DERIVED, flags)
         return MotionSample(
             packet.frame_id, packet.timestamp, displacement, speed, pos, "tracking",
-            tuple((float(p[0] / scale), float(p[1] / scale)) for p in b[keep]),
+            tuple((float(p[0] / scale), float(p[1] / scale)) for p in b[evidence]),
             tuple((float(p[0] / scale), float(p[1] / scale)) for p in cb),
             event, packet.timestamp - self._quiet_since if self._quiet_since is not None else None,
         )
