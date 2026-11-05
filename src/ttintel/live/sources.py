@@ -51,6 +51,11 @@ def synthetic_frame(seconds: float, width: int = 640, height: int = 360) -> np.n
             for yy in (-20, -8, 7, 19):
                 cv2.circle(frame, (cx + xx, cy + yy), 3, (31, 45, 52), -1)
         cv2.line(frame, (cx - 20, cy - 12), (cx + 20, cy - 12), (30, 40, 45), 2)
+    # A small BRIGHT SYNTHETIC ball lets users exercise click-to-seed.
+    ball_x = round(width * (.50 + .22 * math.sin(2 * math.pi * 1.0 * seconds)))
+    ball_y = round(height * (.43 + .12 * math.sin(2 * math.pi * 1.3 * seconds)))
+    cv2.circle(frame, (ball_x, ball_y), 5, (251, 245, 232), -1)
+    cv2.circle(frame, (ball_x - 1, ball_y - 1), 1, (255, 255, 255), -1)
     return frame
 
 def screen_frames(region: Region, stop: Event, fps: int = 30) -> Iterator[FramePacket]:
