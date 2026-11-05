@@ -43,9 +43,23 @@ black; disable browser hardware acceleration or use a local file where permitted
   player box. Otherwise, the rest of the image supplies background motion.
 - **Move/resize** either box by dragging or by using its bottom-right grip.
   ROIs use original image pixels, unaffected by preview zoom.
+- **Click ball to lock / correct**: select the tool, then **click directly on
+  a clearly visible ball in the video preview**. A **USER** ring records this
+  manually selected image-pixel position and arms the visual template matcher.
+  Subsequent **ASSIST** markers and a short yellow trail represent matches to
+  the user-selected patch, **not** a trained ball detector. Each new click
+  corrects/reseeds the track; you can do this repeatedly.
+- **Pause for precise clicks**, then resume. When the ball leaves the search
+  window, disappears, matches competing lookalikes, a hard scene cut occurs,
+  or timestamps become discontinuous, the matcher stops and shows
+  **CLICK TO REACQUIRE**. No guessed continuation is drawn.
+- **Clear ball tracking** erases the marker and disables automatic attempts
+  until the next click. **Reset** clears both ball and player-region tracking.
 - **START / RESUME**, **PAUSE**, **RESET**, **EXIT** are explicit actions.
   Reset clears the optical-flow state and plots; no stale positions are retained.
-- **EXPORT CSV** writes only selected motion diagnostics to a file you choose.
+- **EXPORT CSV** includes human-annotated and visual-template ball X/Y in
+  **original source pixels**, tracking source, heuristic quality and loss
+  state alongside the previous motion diagnostics; you choose the destination.
   Frames are **never** recorded, saved, sent, or uploaded by the live app.
 
 ## Evidence semantics
@@ -64,10 +78,17 @@ Missing, cut, untextured or inconsistent frames are displayed as **UNKNOWN**;
 a stable false zero or extrapolated position is never substituted. Movement
 trails are only instantaneous tracked feature dots, not persistent player IDs.
 
-Table calibration, RTMLib pose, TOTNet ball and shot inference are
-**explicitly disabled in Live Mode** for this first version. The existing offline
-implementations remain available. There is no bright-blob fallback that claims
-to be the genuine TOTNet model, and no automatic checkpoint downloads.
+Table calibration, RTMLib pose, TOTNet learned ball detection and shot inference
+are **explicitly disabled in Live Mode** for this version. The existing offline
+implementations remain available. The optional manual-assisted ball matcher uses an approximately 19-by-19
+pixel greyscale patch around a click, bounded nearby template search,
+appearance similarity and a competing-match check. When an unambiguous match
+cannot be found it reports UNKNOWN and requires a new click. A similarity
+score is **not** a probability that this really is a ball, and fast balls,
+motion blur, camera movement, same-colour distractors and occlusion can defeat
+it. Template tracking is opt-in and cannot identify unseen balls on its own.
+The synthetic demo shows a small bright **simulated** ball for exercising
+click-to-lock without any real footage. No checkpoint downloads are made.
 
 ## Architecture / performance
 
@@ -113,7 +134,8 @@ for the lightweight optical-flow lane.
 
 For a Windows desktop acceptance test: open a permitted browser match; select
 a monitor with the drag overlay; run 2 minutes with one textured player ROI;
-move and resize it; pause/resume; introduce a camera cut; confirm UNKNOWN
+move and resize it; click the real ball to arm assisted tracking; pause/resume,
+reseed after occlusion; introduce a camera cut; confirm UNKNOWN
 after tracking loss and cut; report actual FPS/latency and CPU/RAM usage.
 A normal CI runner cannot certify actual desktop capture.
 
