@@ -79,7 +79,7 @@ class BallAssistTracker:
         if not (math.isfinite(x) and math.isfinite(y)
                 and 0 <= x < w and 0 <= y < h):
             raise ValueError("ball click is outside the frame")
-        ix, iy = round(x), round(y)
+        ix, iy = min(w - 1, round(x)), min(h - 1, round(y))
         r = self.patch_radius
         x0, y0 = max(0, ix - r), max(0, iy - r)
         x1, y1 = min(w, ix + r + 1), min(h, iy + r + 1)
@@ -110,7 +110,8 @@ class BallAssistTracker:
         if self.template is None:
             state = "not_seeded" if self.lost_reason == "not_seeded" else "needs_reseed"
             return self._unknown(packet, state)
-        if packet.frame_id == self.frame_id and self.seed_observation is not None:
+        if (self.seed_observation is not None
+                and packet.frame_id == self.seed_observation.frame_id):
             return self.seed_observation
         if packet.frame_id <= self.frame_id:
             # A queued frame predating the click cannot undo a recent manual seed.
