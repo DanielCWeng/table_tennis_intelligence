@@ -15,6 +15,7 @@ media = ["av>=12", "opencv-python>=4.8"]
 render = ["Pillow>=10"]
 storage = ["duckdb>=0.10", "pyarrow>=14"]
 dev = ["pytest>=8"]
+live = ["opencv-python>=4.8", "mss>=10.2", "PySide6>=6.6", "pyqtgraph>=0.13"]
 
 [project.scripts]
 analyse = "ttintel.cli:main"

@@ -1,3 +1,23 @@
+## Live Mode (optional)
+
+A model-free, screen-capture diagnostic lab for a playing table-tennis video:
+
+```sh
+python -m pip install -e ".[live]"
+ttintel live                 # Windows drag over browser playback
+ttintel live --demo          # synthetic smoke without footage
+ttintel live --file match.mp4
+```
+
+Move the diagnostic window away from the captured video. Selected image-space
+movement is observed using sparse optical flow. **Optional assisted ball
+tracking:** click the visible ball in the preview, let a local template matcher
+follow it, and click again to correct/reacquire; its yellow trail stops when
+visual evidence is ambiguous. This is **human-seeded visual matching, not
+verified ball detection**. Player identity, shots and table geometry remain
+unavailable in the live UI. No screenshots are recorded. See [Live Mode guide](docs/LIVE_MODE.md) for controls, known
+limitations, confidence/provenance boundaries and benchmark instructions.
+
 # Table Tennis Video Intelligence
 
 Offline, confidence-aware table-tennis video perception. The first pass turns

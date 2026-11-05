@@ -16,7 +16,8 @@ from .pipeline import analyse_video
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="analyse",
-        description="Convert a table-tennis video into confidence-aware session data.",
+        description="Offline table-tennis analysis (or use 'ttintel live' for live motion diagnostics).",
+        epilog="Live browser/screen capture: ttintel live --help",
     )
     parser.add_argument("video", type=Path, help="input video")
     parser.add_argument("--output", type=Path, default=Path("outputs/sessions"), help="session output root")
@@ -37,7 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    # Preserve legacy 'analyse video.mp4' while adding 'ttintel live'.
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    if arguments and arguments[0] == "live":
+        from .live.cli import main as live_main
+        live_main(arguments[1:])
+        return
+    args = build_parser().parse_args(arguments)
     manual = None
     if args.manual_corners:
         manual = calibrate_manual(load_manual_corners(args.manual_corners))
