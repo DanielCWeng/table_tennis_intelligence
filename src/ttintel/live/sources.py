@@ -14,6 +14,7 @@ import numpy as np
 
 from ttintel.media import FramePacket, iter_video_frames
 from .core import LiveMotionTracker, MotionSample, ROI, Region
+from .ball import BallAssistTracker, BallObservation
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,8 @@ class Result:
     grabbed_at: float
     analysed_at: float
     analysis_ms: float
+    ball: BallObservation | None = None
+    ball_epoch: int = 0
 
 
 def synthetic_frame(seconds: float, width: int = 640, height: int = 360) -> np.ndarray:
@@ -139,6 +142,8 @@ class LiveEngine:
         self.raw: Queue[tuple[FramePacket, float]] = Queue(maxsize=2)
         self.results: Queue[Result] = Queue(maxsize=2)
         self.tracker = LiveMotionTracker(width=width)
+        self.ball = BallAssistTracker()
+        self.ball_epoch = 0
         self.lock = Lock()
         self.stop_event = Event()
         self.pause_event = Event()
@@ -181,6 +186,8 @@ class LiveEngine:
     def reset(self) -> None:
         with self.lock:
             self.tracker.reset()
+            self.ball.reset()
+            self.ball_epoch += 1
         self.capture_times.clear()
         self.processing_times.clear()
         self._drain(self.raw)
@@ -190,6 +197,20 @@ class LiveEngine:
     def set_regions(self, roi: ROI | None, reference: ROI | None) -> None:
         with self.lock:
             self.tracker.set_regions(roi, reference)
+
+    def seed_ball(self, packet: FramePacket, x: float, y: float) -> BallObservation:
+        """User annotation uses the exact preview frame, never a newer hidden frame."""
+        with self.lock:
+            observation = self.ball.seed(packet, (x, y))
+            self.ball_epoch += 1
+        self._drain(self.results)
+        return observation
+
+    def clear_ball(self) -> None:
+        with self.lock:
+            self.ball.reset()
+            self.ball_epoch += 1
+        self._drain(self.results)
 
     def close(self) -> None:
         self.stop_event.set()
@@ -256,6 +277,8 @@ class LiveEngine:
             try:
                 with self.lock:
                     sample = self.tracker.process(packet)
+                    ball = self.ball.process(packet, scene_cut=sample.reason == "camera_cut")
+                    epoch = self.ball_epoch
             except Exception as exc:
                 self.errors.append(f"analysis: {exc}")
                 continue
@@ -263,13 +286,16 @@ class LiveEngine:
             self.processing_times.append(ended)
             self.dropped_display += offer_latest(
                 self.results, Result(packet, sample, grabbed_at, ended,
-                                     (time.perf_counter() - started) * 1000)
+                                     (time.perf_counter() - started) * 1000,
+                                     ball, epoch)
             )
 
     def latest(self) -> Result | None:
         value = None
         while True:
             try:
-                value = self.results.get_nowait()
+                candidate = self.results.get_nowait()
             except Empty:
                 return value
+            if candidate.ball_epoch == self.ball_epoch and (candidate.ball is None or candidate.ball.state != "stale_before_seed"):
+                value = candidate
