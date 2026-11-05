@@ -10,9 +10,12 @@ ttintel live --file match.mp4
 ```
 
 Move the diagnostic window away from the captured video. Selected image-space
-movement is observed using sparse optical flow; player identity, shots, ball
-and table geometry remain **unavailable** in the live UI. No screenshots are
-recorded. See [Live Mode guide](docs/LIVE_MODE.md) for controls, known
+movement is observed using sparse optical flow. **Optional assisted ball
+tracking:** click the visible ball in the preview, let a local template matcher
+follow it, and click again to correct/reacquire; its yellow trail stops when
+visual evidence is ambiguous. This is **human-seeded visual matching, not
+verified ball detection**. Player identity, shots and table geometry remain
+unavailable in the live UI. No screenshots are recorded. See [Live Mode guide](docs/LIVE_MODE.md) for controls, known
 limitations, confidence/provenance boundaries and benchmark instructions.
 
 # Table Tennis Video Intelligence
