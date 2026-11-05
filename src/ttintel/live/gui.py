@@ -11,6 +11,7 @@ import pyqtgraph as pg
 import numpy as np
 
 from .core import ROI
+from .ball import BallObservation
 from .sources import LiveEngine, Result
 
 
@@ -82,6 +83,7 @@ class EditableROI(QtWidgets.QGraphicsRectItem):
 
 class VideoView(QtWidgets.QGraphicsView):
     regions_changed = QtCore.Signal()
+    ball_clicked = QtCore.Signal(float, float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -105,14 +107,18 @@ class VideoView(QtWidgets.QGraphicsView):
         self._origin: QtCore.QPointF | None = None
         self._rubber: QtWidgets.QGraphicsRectItem | None = None
         self.dots: list[QtWidgets.QGraphicsEllipseItem] = []
+        self.ball_items: list[QtWidgets.QGraphicsItem] = []
+        self.ball_trail: deque[tuple[float, float]] = deque(maxlen=16)
         self.shape: tuple[int, int] | None = None
 
-    def set_frame(self, frame: np.ndarray, points: tuple, references: tuple) -> None:
+    def set_frame(self, frame: np.ndarray, points: tuple, references: tuple,
+                  ball: BallObservation | None = None) -> None:
         h, w = frame.shape[:2]
         if (w, h) != self.shape:
             self.shape = (w, h)
             self.scene().setSceneRect(0, 0, w, h)
             self.clear_rois()
+            self.ball_trail.clear()
         rgb = np.ascontiguousarray(frame)
         image = QtGui.QImage(rgb.data, w, h, rgb.strides[0],
                              QtGui.QImage.Format.Format_RGB888).copy()
@@ -127,7 +133,39 @@ class VideoView(QtWidgets.QGraphicsView):
                                                QtGui.QBrush(QtGui.QColor(color)))
                 dot.setZValue(2)
                 self.dots.append(dot)
+        self.set_ball(ball)
         self.fitInView(self.sceneRect(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_ball(self, observation: BallObservation | None) -> None:
+        """Draw only evidenced positions; stop trail immediately on loss."""
+        for item in self.ball_items:
+            self.scene().removeItem(item)
+        self.ball_items.clear()
+        if observation is None or observation.position.value is None:
+            self.ball_trail.clear()
+            return
+        p = observation.position.value
+        if observation.state == "manual":
+            self.ball_trail.clear()
+        self.ball_trail.append((p.x, p.y))
+        for i, (x, y) in enumerate(self.ball_trail):
+            size = 2.5 + i * .17
+            dot = self.scene().addEllipse(x - size, y - size, size * 2, size * 2,
+                                          QtGui.QPen(QtGui.QColor("#f8e49b")),
+                                          QtGui.QBrush(QtGui.QColor("#f8e49b")))
+            dot.setZValue(9)
+            self.ball_items.append(dot)
+        ring = self.scene().addEllipse(p.x - 12, p.y - 12, 24, 24,
+                                       QtGui.QPen(QtGui.QColor("#f8e49b"), 2),
+                                       QtGui.QBrush(QtCore.Qt.BrushStyle.NoBrush))
+        ring.setZValue(10)
+        self.ball_items.append(ring)
+        caption = self.scene().addText("USER" if observation.state == "manual" else "ASSIST",
+                                       QtGui.QFont("Segoe UI", 9, QtGui.QFont.Weight.Bold))
+        caption.setDefaultTextColor(QtGui.QColor("#f8e49b"))
+        caption.setPos(p.x + 13, p.y - 21)
+        caption.setZValue(10)
+        self.ball_items.append(caption)
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)
@@ -154,6 +192,13 @@ class VideoView(QtWidgets.QGraphicsView):
         )
 
     def mousePressEvent(self, event: object) -> None:
+        if self.mode == "ball" and self.shape and event.button() == QtCore.Qt.MouseButton.LeftButton:
+            p = self._point(event.pos())
+            self.mode = None
+            self.unsetCursor()
+            self.ball_clicked.emit(p.x(), p.y())
+            event.accept()
+            return
         if self.mode and self.shape and event.button() == QtCore.Qt.MouseButton.LeftButton:
             self._origin = self._point(event.pos())
             self._rubber = self.scene().addRect(QtCore.QRectF(self._origin, self._origin),
@@ -207,6 +252,8 @@ class LiveWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.engine = engine
         self.samples: deque[tuple] = deque(maxlen=1800)
+        self.ball_rows: dict[int, tuple] = {}
+        self._last_result: Result | None = None
         self.ui_update_times: deque[float] = deque(maxlen=90)
         self.first_timestamp: float | None = None
         self.setWindowTitle("TABLE TENNIS INTELLIGENCE  /  LIVE LAB")
@@ -237,6 +284,7 @@ class LiveWindow(QtWidgets.QMainWindow):
         body.addLayout(left, 3)
         self.video = VideoView()
         self.video.regions_changed.connect(self._regions_changed)
+        self.video.ball_clicked.connect(self._ball_clicked)
         left.addWidget(self.video, 1)
         row = QtWidgets.QHBoxLayout()
         left.addLayout(row)
@@ -248,8 +296,18 @@ class LiveWindow(QtWidgets.QMainWindow):
             button = QtWidgets.QPushButton(label)
             button.clicked.connect(callback)
             row.addWidget(button)
+        ball_tools = QtWidgets.QHBoxLayout()
+        left.addLayout(ball_tools)
+        for label, callback in (
+            ("Click ball to lock / correct", lambda: self.video.choose("ball")),
+            ("Clear ball tracking", self._clear_ball),
+        ):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(callback)
+            ball_tools.addWidget(button)
         note = QtWidgets.QLabel(
-            "Drag to draw. Move an ROI by its border; resize with bottom-right grip. "
+            "Drag to draw ROIs; click once to seed/correct the ball. "
+            "Pause for precise clicks, then resume. A lost/ambiguous match needs a new click. "
             "Place this window away from the captured browser video.")
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -276,6 +334,10 @@ class LiveWindow(QtWidgets.QMainWindow):
         right.addWidget(self.velocity)
         self.quality = QtWidgets.QLabel("Tracking confidence: —")
         right.addWidget(self.quality)
+        self.ball_status = QtWidgets.QLabel("Ball assist: click the ball to initialise")
+        self.ball_status.setObjectName("value")
+        self.ball_status.setWordWrap(True)
+        right.addWidget(self.ball_status)
         self.quiet = QtWidgets.QLabel("Quiet interval: —")
         right.addWidget(self.quiet)
         self.telemetry = QtWidgets.QLabel("Capture —  •  Processing —  •  Display —")
@@ -286,7 +348,7 @@ class LiveWindow(QtWidgets.QMainWindow):
         right.addWidget(self.event)
         self.models = QtWidgets.QLabel(
             "ACTIVE: sparse LK flow + reference compensation\n"
-            "POSE: unavailable  •  BALL: unavailable\n"
+            "POSE: unavailable  •  BALL: user-seeded template assist\n"
             "TABLE CALIBRATION: unavailable  •  SHOTS: unverified")
         self.models.setObjectName("muted")
         right.addWidget(self.models)
@@ -301,7 +363,7 @@ class LiveWindow(QtWidgets.QMainWindow):
         self.intensity_plot.showGrid(x=True, y=True, alpha=.20)
         right.addWidget(self.intensity_plot, 2)
         self.footer = QtWidgets.QLabel(
-            "Unknown means unknown. Optical-flow quality is heuristic, not calibrated. "
+            "Unknown means unknown. Ball template matching is not verified detection. "
             "Nothing is recorded unless CSV export is requested.")
         self.footer.setObjectName("muted")
         self.footer.setWordWrap(True)
@@ -324,10 +386,40 @@ class LiveWindow(QtWidgets.QMainWindow):
         self.samples.clear()
         self.ui_update_times.clear()
         self.first_timestamp = None
+        self.ball_rows.clear()
+        self._last_result = None
+        self.video.set_ball(None)
+        self.ball_status.setText("Ball assist: click the ball to initialise")
         self.curve.setData([], [])
         self.intensity_curve.setData([], [])
         self.event.setText("Latest candidate: none")
         self.status.setText("RESET  /  tracking restarted")
+
+    def _ball_clicked(self, x: float, y: float) -> None:
+        if self._last_result is None:
+            self.ball_status.setText("Ball assist: start playback before clicking")
+            return
+        try:
+            observation = self.engine.seed_ball(self._last_result.packet, x, y)
+        except ValueError as exc:
+            self.ball_status.setText(f"Ball click rejected: {exc}")
+            return
+        self.video.set_ball(observation)
+        self._record_ball(observation)
+        self.ball_status.setText(f"Ball: USER CLICK at ({x:.0f}, {y:.0f})  /  tracking armed")
+
+    def _clear_ball(self) -> None:
+        self.engine.clear_ball()
+        self.video.set_ball(None)
+        self.ball_status.setText("Ball assist: cleared  /  click to seed")
+
+    def _record_ball(self, ball: BallObservation) -> None:
+        p = ball.position.value
+        self.ball_rows[ball.frame_id] = (
+            p.x if p else None, p.y if p else None,
+            ball.position.source, ball.position.confidence if p else None, ball.state)
+        if len(self.ball_rows) > 1800:
+            self.ball_rows.pop(next(iter(self.ball_rows)))
 
     def _regions_changed(self) -> None:
         self.engine.set_regions(*self.video.regions())
@@ -350,13 +442,28 @@ class LiveWindow(QtWidgets.QMainWindow):
 
     def _render_result(self, result: Result) -> None:
         sample = result.sample
-        self.video.set_frame(result.packet.image, sample.points, sample.reference_points)
+        self._last_result = result
+        self.video.set_frame(result.packet.image, sample.points, sample.reference_points,
+                             result.ball)
+        if result.ball is not None:
+            self._record_ball(result.ball)
+            p = result.ball.position.value
+            if p:
+                self.ball_status.setText(
+                    f"Ball: {result.ball.state.upper()}  /  ({p.x:.0f}, {p.y:.0f})"
+                    f"  /  visual-match quality {result.ball.position.confidence:.0%}"
+                    if result.ball.state == "assisted" else
+                    f"Ball: USER CLICK  /  ({p.x:.0f}, {p.y:.0f})")
+            else:
+                self.ball_status.setText(
+                    "Ball: CLICK TO REACQUIRE" if result.ball.state not in ("not_seeded",)
+                    else "Ball assist: click the ball to initialise")
         if self.first_timestamp is None:
             self.first_timestamp = sample.timestamp
         t = sample.timestamp - self.first_timestamp
         pos = sample.position.value
         intensity = sample.intensity.value
-        self.samples.append((t, pos.x if pos else None,
+        self.samples.append((sample.frame_id, t, pos.x if pos else None,
                              intensity, sample.displacement.confidence,
                              sample.reason, sample.candidate))
         if pos is not None:
@@ -389,11 +496,11 @@ class LiveWindow(QtWidgets.QMainWindow):
             f"  /  {sample.reason.upper()}  /  {t:.1f}s")
         data = list(self.samples)[-300:]
         self.curve.setData(
-            [row[0] for row in data if row[1] is not None],
-            [row[1] for row in data if row[1] is not None])
-        self.intensity_curve.setData(
-            [row[0] for row in data if row[2] is not None],
+            [row[1] for row in data if row[2] is not None],
             [row[2] for row in data if row[2] is not None])
+        self.intensity_curve.setData(
+            [row[1] for row in data if row[3] is not None],
+            [row[3] for row in data if row[3] is not None])
 
     def _export(self) -> None:
         if not self.samples:
@@ -406,9 +513,13 @@ class LiveWindow(QtWidgets.QMainWindow):
             return
         with Path(filename).open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(("elapsed_s", "relative_x_px", "intensity_px_s",
-                             "tracking_quality_heuristic", "state", "candidate"))
-            writer.writerows(self.samples)
+            writer.writerow(("frame_id", "elapsed_s", "relative_x_px", "intensity_px_s",
+                             "tracking_quality_heuristic", "state", "candidate",
+                             "ball_x_px", "ball_y_px", "ball_source",
+                             "ball_quality_heuristic", "ball_state"))
+            for motion_row in self.samples:
+                writer.writerow((*motion_row, *self.ball_rows.get(motion_row[0],
+                                 (None, None, None, None, "not_recorded"))))
         self.status.setText(f"Exported {len(self.samples)} diagnostic samples")
 
     def closeEvent(self, event: object) -> None:
